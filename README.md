@@ -11,6 +11,9 @@ downloading episodes to a folder of your choosing.
   automatically download new ones each time it refreshes.
 - **Download** individual episodes or an entire back catalog, with a concurrent
   download queue and per-episode progress.
+- **Double-click to play** — double-clicking an episode plays it in your default
+  audio app; if it isn't downloaded yet it's fetched first and plays automatically
+  when the download finishes.
 - **Organised storage** — you pick one master folder, and every podcast gets
   its own sub-folder named after the show:
 

@@ -29,7 +29,7 @@ struct DownloadsView: View {
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button("Open Master Folder", systemImage: "folder") { model.openMasterFolder() }
-                Button("Cancel All", systemImage: "xmark.circle") { model.downloads.cancelAll() }
+                Button("Cancel All", systemImage: "xmark.circle") { model.cancelAllDownloads() }
                     .disabled(model.downloads.activeItems.isEmpty)
                 Button("Clear Finished", systemImage: "trash") { model.downloads.clearFinished() }
                     .disabled(model.downloads.finishedItems.isEmpty)
@@ -54,6 +54,10 @@ struct DownloadRow: View {
             actions
         }
         .padding(.vertical, 4)
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) {
+            if item.state == .finished { model.play(item.destination) }
+        }
     }
 
     @ViewBuilder
@@ -85,9 +89,11 @@ struct DownloadRow: View {
     private var actions: some View {
         switch item.state {
         case .queued, .downloading:
-            Button("Cancel", systemImage: "xmark.circle") { model.downloads.cancel(item.id) }
+            Button("Cancel", systemImage: "xmark.circle") { model.cancelDownload(item.id) }
                 .labelStyle(.iconOnly).buttonStyle(.borderless)
         case .finished:
+            Button("Play", systemImage: "play.circle") { model.play(item.destination) }
+                .labelStyle(.iconOnly).buttonStyle(.borderless)
             Button("Show in Finder", systemImage: "magnifyingglass.circle") { model.revealInFinder(item.destination) }
                 .labelStyle(.iconOnly).buttonStyle(.borderless)
         case .failed, .cancelled:

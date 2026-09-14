@@ -185,13 +185,19 @@ struct EpisodeRow: View {
             trailing
         }
         .padding(.vertical, 4)
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) {
+            model.downloadAndPlay(episode, from: podcast)
+        }
+        .help(localFile == nil ? "Double-click to download and play" : "Double-click to play")
         .contextMenu {
             if let localFile {
+                Button("Play") { model.play(localFile) }
                 Button("Show in Finder") { model.revealInFinder(localFile) }
-                Button("Open") { NSWorkspace.shared.open(localFile) }
                 Divider()
                 Button("Download Again") { model.download(episode, from: podcast) }
             } else {
+                Button("Download and Play") { model.downloadAndPlay(episode, from: podcast) }
                 Button("Download") { model.download(episode, from: podcast) }
                     .disabled(model.downloads.isQueuedOrActive(episode))
             }
@@ -207,6 +213,13 @@ struct EpisodeRow: View {
         if let localFile {
             HStack(spacing: 6) {
                 Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                Button {
+                    model.play(localFile)
+                } label: {
+                    Image(systemName: "play.circle")
+                }
+                .buttonStyle(.borderless)
+                .help("Play")
                 Button {
                     model.revealInFinder(localFile)
                 } label: {
@@ -229,7 +242,7 @@ struct EpisodeRow: View {
                     }
                 }
                 Button {
-                    model.downloads.cancel(item.id)
+                    model.cancelDownload(item.id)
                 } label: {
                     Image(systemName: "xmark.circle")
                 }

@@ -11,10 +11,17 @@ final class AppModel {
     let library = Library()
     let downloads = DownloadManager()
 
+    /// Episode ids that should open in the default player as soon as they land on disk.
+    private var playWhenFinished: Set<String> = []
+
     init() {
         downloads.maxConcurrent = settings.maxConcurrentDownloads
         downloads.setFinishedHandler { [weak self] episode, url in
-            self?.library.markDownloaded(episode, at: url)
+            guard let self else { return }
+            library.markDownloaded(episode, at: url)
+            if playWhenFinished.remove(episode.id) != nil {
+                play(url)
+            }
         }
     }
 
@@ -27,6 +34,31 @@ final class AppModel {
     func download(_ episode: Episode, from podcast: Podcast) {
         let destination = settings.file(for: episode, in: podcast)
         downloads.enqueue(episode, from: podcast, to: destination)
+    }
+
+    /// Double-click behaviour: play immediately if the file exists, otherwise
+    /// download it and play when the download completes.
+    func downloadAndPlay(_ episode: Episode, from podcast: Podcast) {
+        if let file = library.localFile(for: episode) {
+            play(file)
+            return
+        }
+        playWhenFinished.insert(episode.id)
+        download(episode, from: podcast)
+    }
+
+    func cancelDownload(_ id: String) {
+        playWhenFinished.remove(id)
+        downloads.cancel(id)
+    }
+
+    func cancelAllDownloads() {
+        playWhenFinished.removeAll()
+        downloads.cancelAll()
+    }
+
+    func play(_ url: URL) {
+        NSWorkspace.shared.open(url)
     }
 
     func downloadAll(_ podcast: Podcast) {
