@@ -1,5 +1,7 @@
 # Podcast Downloader
 
+<img src="Resources/AppIcon-preview.png" width="128" alt="App icon">
+
 A native macOS app for finding podcasts, subscribing to their RSS feeds, and
 downloading episodes to a folder of your choosing.
 
@@ -45,6 +47,7 @@ swift run
 Package.swift                     Swift Package Manager manifest
 Resources/Info.plist              Bundle metadata used by build_app.sh
 scripts/build_app.sh              Builds and packages the .app
+scripts/make_icon.swift           Regenerates Resources/AppIcon.icns
 Sources/PodcastDownloader/
   PodcastDownloaderApp.swift      @main entry point, menu commands, settings scene
   Models/                         Podcast, Episode, DownloadItem
