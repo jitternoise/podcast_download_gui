@@ -1,43 +1,106 @@
 import SwiftUI
 
+/// Shows what's in the master folder, plus anything currently in flight.
 struct DownloadsView: View {
     @Environment(AppModel.self) private var model
 
+    private var active: [DownloadItem] { model.downloads.activeItems }
+    private var failed: [DownloadItem] {
+        model.downloads.finishedItems
+            .filter { $0.state != .finished }
+            .sorted { $0.createdAt > $1.createdAt }
+    }
+    private var totalFiles: Int { model.onDisk.reduce(0) { $0 + $1.files.count } }
+    private var totalSize: Int64 { model.onDisk.reduce(0) { $0 + $1.totalSize } }
+
     var body: some View {
         Group {
-            if model.downloads.items.isEmpty {
-                ContentUnavailableView("No downloads", systemImage: "arrow.down.circle",
-                                       description: Text("Episodes you download will show up here."))
+            if active.isEmpty, failed.isEmpty, model.onDisk.isEmpty {
+                ContentUnavailableView("Nothing downloaded yet", systemImage: "arrow.down.circle",
+                                       description: Text("Episodes you download are saved to\n\(model.settings.masterDirectory.path)"))
             } else {
                 List {
-                    let active = model.downloads.activeItems
-                    let finished = model.downloads.finishedItems.sorted { $0.createdAt > $1.createdAt }
                     if !active.isEmpty {
                         Section("In Progress (\(active.count))") {
                             ForEach(active) { DownloadRow(item: $0) }
                         }
                     }
-                    if !finished.isEmpty {
-                        Section("Finished") {
-                            ForEach(finished) { DownloadRow(item: $0) }
+                    if !failed.isEmpty {
+                        Section("Failed") {
+                            ForEach(failed) { DownloadRow(item: $0) }
+                        }
+                    }
+                    ForEach(model.onDisk) { folder in
+                        Section {
+                            ForEach(folder.files) { LocalFileRow(file: $0) }
+                        } header: {
+                            HStack {
+                                Text(folder.name)
+                                Spacer()
+                                Text("\(folder.files.count) episodes · \(bytes(folder.totalSize))")
+                                    .foregroundStyle(.secondary)
+                                    .font(.caption)
+                            }
                         }
                     }
                 }
             }
         }
         .navigationTitle("Downloads")
+        .navigationSubtitle("\(totalFiles) files · \(bytes(totalSize)) in \(model.settings.masterDirectory.path)")
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
+                Button("Rescan", systemImage: "arrow.clockwise") { model.rescanDisk() }
                 Button("Open Master Folder", systemImage: "folder") { model.openMasterFolder() }
                 Button("Cancel All", systemImage: "xmark.circle") { model.cancelAllDownloads() }
-                    .disabled(model.downloads.activeItems.isEmpty)
-                Button("Clear Finished", systemImage: "trash") { model.downloads.clearFinished() }
-                    .disabled(model.downloads.finishedItems.isEmpty)
+                    .disabled(active.isEmpty)
+                Button("Clear Failed", systemImage: "trash") { model.downloads.clearFinished() }
+                    .disabled(failed.isEmpty)
             }
+        }
+        .onAppear { model.rescanDisk() }
+    }
+
+    private func bytes(_ n: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: max(0, n), countStyle: .file)
+    }
+}
+
+/// A file that exists in the master folder.
+struct LocalFileRow: View {
+    @Environment(AppModel.self) private var model
+    let file: LocalFile
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "waveform")
+                .foregroundStyle(.secondary)
+                .frame(width: 20)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(file.name).font(.headline).lineLimit(1)
+                Text("\(ByteCountFormatter.string(fromByteCount: file.size, countStyle: .file)) · \(file.modified, format: .dateTime.year().month(.abbreviated).day())")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Play", systemImage: "play.circle") { model.play(file.url) }
+                .labelStyle(.iconOnly).buttonStyle(.borderless)
+            Button("Show in Finder", systemImage: "magnifyingglass.circle") { model.revealInFinder(file.url) }
+                .labelStyle(.iconOnly).buttonStyle(.borderless)
+        }
+        .padding(.vertical, 3)
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) { model.play(file.url) }
+        .contextMenu {
+            Button("Play") { model.play(file.url) }
+            Button("Show in Finder") { model.revealInFinder(file.url) }
+            Divider()
+            Button("Move to Trash", role: .destructive) { model.trash(file) }
         }
     }
 }
 
+/// An in-flight or failed queue item.
 struct DownloadRow: View {
     @Environment(AppModel.self) private var model
     let item: DownloadItem
@@ -54,10 +117,6 @@ struct DownloadRow: View {
             actions
         }
         .padding(.vertical, 4)
-        .contentShape(Rectangle())
-        .onTapGesture(count: 2) {
-            if item.state == .finished { model.play(item.destination) }
-        }
     }
 
     @ViewBuilder
@@ -94,10 +153,8 @@ struct DownloadRow: View {
         case .finished:
             Button("Play", systemImage: "play.circle") { model.play(item.destination) }
                 .labelStyle(.iconOnly).buttonStyle(.borderless)
-            Button("Show in Finder", systemImage: "magnifyingglass.circle") { model.revealInFinder(item.destination) }
-                .labelStyle(.iconOnly).buttonStyle(.borderless)
         case .failed, .cancelled:
-            Button("Retry") { model.downloads.retry(item.id) }
+            Button("Retry") { model.download(item.episode, from: item.podcast) }
                 .buttonStyle(.bordered).controlSize(.small)
         }
     }

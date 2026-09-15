@@ -14,8 +14,10 @@ downloading episodes to a folder of your choosing.
 - **Double-click to play** — double-clicking an episode plays it in your default
   audio app; if it isn't downloaded yet it's fetched first and plays automatically
   when the download finishes.
-- **Organised storage** — you pick one master folder, and every podcast gets
-  its own sub-folder named after the show:
+- **One folder, always** — you pick a single master folder and every podcast
+  gets its own sub-folder named after the show. Change the folder in Settings
+  and the app moves your whole library there. The Downloads tab shows exactly
+  what's in that folder.
 
   ```
   ~/Downloads/Podcasts/
@@ -58,6 +60,7 @@ Sources/PodcastDownloader/
     AppModel.swift                Glue between settings, library and downloads
     AppSettings.swift             Master folder + concurrency (UserDefaults)
     Library.swift                 Subscriptions & episode cache (JSON on disk)
+    LibraryFolder.swift           Scans / relocates the master folder
     FeedParser.swift              RSS 2.0 + iTunes-extension parser
     PodcastSearchService.swift    Apple Podcasts search API client
     DownloadManager.swift         URLSession download queue
@@ -69,7 +72,7 @@ Sources/PodcastDownloader/
 | What | Where |
 |------|-------|
 | Downloaded audio | Master folder (default `~/Downloads/Podcasts`, change in **Settings ⌘,**) |
-| Subscriptions & episode cache | `~/Library/Application Support/PodcastDownloader/library.json` |
+| Subscriptions & episode cache | `~/Library/Application Support/PodcastDownloader/library.json` (download locations stored relative to the master folder) |
 | Preferences | `UserDefaults` |
 
 ## Tests

@@ -3,6 +3,9 @@ import Observation
 
 /// Subscriptions, cached episodes, and the record of what has been downloaded.
 /// Persisted as a single JSON file in ~/Library/Application Support.
+///
+/// Download locations are stored *relative to the master folder* so the whole
+/// library can be moved by simply pointing the app at a new folder.
 @MainActor
 @Observable
 final class Library {
@@ -15,7 +18,7 @@ final class Library {
 
     private(set) var podcasts: [Podcast] = []
     private(set) var episodes: [String: [Episode]] = [:]     // podcast id -> episodes, newest first
-    private(set) var downloaded: [String: String] = [:]      // episode id -> file path
+    private(set) var downloaded: [String: String] = [:]      // episode id -> path relative to master folder
     private(set) var lastRefreshed: [String: Date] = [:]     // podcast id -> date
     private(set) var refreshing: Set<String> = []
     var refreshErrors: [String: String] = [:]                // podcast id -> last error
@@ -44,11 +47,9 @@ final class Library {
         episodes[podcast.id] ?? []
     }
 
-    /// Returns the local file if the episode was downloaded and the file still exists.
-    func localFile(for episode: Episode) -> URL? {
-        guard let path = downloaded[episode.id] else { return nil }
-        let url = URL(fileURLWithPath: path)
-        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    /// Path relative to the master folder where this episode was saved, if known.
+    func downloadedRelativePath(for episode: Episode) -> String? {
+        downloaded[episode.id]
     }
 
     // MARK: Mutations
@@ -74,14 +75,29 @@ final class Library {
         save()
     }
 
-    func markDownloaded(_ episode: Episode, at url: URL) {
-        downloaded[episode.id] = url.path
+    func markDownloaded(_ episode: Episode, relativePath: String) {
+        downloaded[episode.id] = relativePath
         save()
     }
 
     func forgetDownload(_ episode: Episode) {
         downloaded[episode.id] = nil
         save()
+    }
+
+    /// Converts any absolute paths saved by earlier versions into master-relative ones.
+    func migrateDownloadPaths(masterDirectory: URL) {
+        let prefix = masterDirectory.standardizedFileURL.path + "/"
+        var changed = false
+        for (id, path) in downloaded where path.hasPrefix("/") {
+            if path.hasPrefix(prefix) {
+                downloaded[id] = String(path.dropFirst(prefix.count))
+            } else {
+                downloaded[id] = nil
+            }
+            changed = true
+        }
+        if changed { save() }
     }
 
     /// Cache episodes for a podcast the user is only previewing (not subscribed).

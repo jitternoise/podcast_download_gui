@@ -19,13 +19,26 @@ struct SettingsView: View {
                             .frame(maxWidth: 320, alignment: .trailing)
                         HStack {
                             Button("Choose…") { chooseFolder() }
+                                .disabled(model.moveStatus != nil)
                             Button("Reveal in Finder") { model.openMasterFolder() }
                         }
                     }
                 }
-                Text("Each podcast gets its own sub-folder named after the show, e.g. “\(settings.masterDirectory.lastPathComponent)/My Podcast/2024-01-15 - Episode.mp3”.")
+                Text("All downloads live in this one folder, in a sub-folder per podcast. Choosing a different folder moves everything already downloaded there.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                if let status = model.moveStatus {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text(status).font(.callout)
+                    }
+                }
+                if let error = model.moveError {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                }
             }
 
             Section("Downloads") {
@@ -45,11 +58,11 @@ struct SettingsView: View {
         panel.canChooseFiles = false
         panel.canCreateDirectories = true
         panel.allowsMultipleSelection = false
-        panel.prompt = "Use This Folder"
-        panel.message = "Choose the folder where podcast sub-folders will be created."
+        panel.prompt = "Move Library Here"
+        panel.message = "Choose the folder where podcast sub-folders will be kept. Existing downloads will be moved there."
         panel.directoryURL = model.settings.masterDirectory
         if panel.runModal() == .OK, let url = panel.url {
-            model.settings.masterDirectory = url
+            Task { await model.changeMasterDirectory(to: url) }
         }
     }
 }

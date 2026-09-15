@@ -84,7 +84,7 @@ struct PodcastDetailView: View {
     }
 
     private var downloadedCount: Int {
-        episodes.filter { model.library.localFile(for: $0) != nil }.count
+        episodes.filter { model.localFile(for: $0, in: current) != nil }.count
     }
 
     // MARK: Episodes
@@ -157,7 +157,7 @@ struct EpisodeRow: View {
     let episode: Episode
     let podcast: Podcast
 
-    private var localFile: URL? { model.library.localFile(for: episode) }
+    private var localFile: URL? { model.localFile(for: episode, in: podcast) }
     private var downloadItem: DownloadItem? { model.downloads.item(for: episode) }
 
     var body: some View {
