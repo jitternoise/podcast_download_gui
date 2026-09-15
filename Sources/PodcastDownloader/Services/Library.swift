@@ -14,12 +14,14 @@ final class Library {
         var episodes: [String: [Episode]]
         var downloaded: [String: String]
         var lastRefreshed: [String: Date]
+        var playbackPositions: [String: Double]?
     }
 
     private(set) var podcasts: [Podcast] = []
     private(set) var episodes: [String: [Episode]] = [:]     // podcast id -> episodes, newest first
     private(set) var downloaded: [String: String] = [:]      // episode id -> path relative to master folder
     private(set) var lastRefreshed: [String: Date] = [:]     // podcast id -> date
+    private(set) var playbackPositions: [String: Double] = [:] // episode id -> seconds listened to
     private(set) var refreshing: Set<String> = []
     var refreshErrors: [String: String] = [:]                // podcast id -> last error
 
@@ -77,6 +79,15 @@ final class Library {
 
     func markDownloaded(_ episode: Episode, relativePath: String) {
         downloaded[episode.id] = relativePath
+        save()
+    }
+
+    func playbackPosition(for episode: Episode) -> Double {
+        playbackPositions[episode.id] ?? 0
+    }
+
+    func setPlaybackPosition(_ seconds: Double, for episode: Episode) {
+        playbackPositions[episode.id] = seconds > 0 ? seconds : nil
         save()
     }
 
@@ -153,6 +164,7 @@ final class Library {
         episodes = snap.episodes
         downloaded = snap.downloaded
         lastRefreshed = snap.lastRefreshed
+        playbackPositions = snap.playbackPositions ?? [:]
     }
 
     private func save() {
@@ -160,7 +172,8 @@ final class Library {
             podcasts: podcasts,
             episodes: episodes.filter { key, _ in podcasts.contains { $0.id == key } },
             downloaded: downloaded,
-            lastRefreshed: lastRefreshed
+            lastRefreshed: lastRefreshed,
+            playbackPositions: playbackPositions
         )
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601

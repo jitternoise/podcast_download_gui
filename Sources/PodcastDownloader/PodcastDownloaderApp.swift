@@ -17,6 +17,21 @@ struct PodcastDownloaderApp: App {
                 Button("Refresh All Subscriptions") { Task { await model.refreshAll() } }
                     .keyboardShortcut("r", modifiers: .command)
             }
+            CommandMenu("Playback") {
+                Button(model.player.isPlaying ? "Pause" : "Play") { model.player.togglePlayPause() }
+                    .keyboardShortcut(.space, modifiers: .option)
+                    .disabled(!model.player.hasItem)
+                Button("Back \(Int(Player.skipInterval)) Seconds") { model.player.skipBackward() }
+                    .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
+                    .disabled(!model.player.hasItem)
+                Button("Forward \(Int(Player.skipInterval)) Seconds") { model.player.skipForward() }
+                    .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
+                    .disabled(!model.player.hasItem)
+                Divider()
+                Button("Stop") { model.player.stop() }
+                    .keyboardShortcut(".", modifiers: .command)
+                    .disabled(!model.player.hasItem)
+            }
         }
 
         Settings {

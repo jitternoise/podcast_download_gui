@@ -16,6 +16,9 @@ struct ContentView: View {
         } detail: {
             detail
         }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            PlayerBar()
+        }
         .task {
             await model.refreshAll()
         }

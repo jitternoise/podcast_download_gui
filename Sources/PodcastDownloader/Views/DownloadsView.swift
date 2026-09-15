@@ -32,7 +32,7 @@ struct DownloadsView: View {
                     }
                     ForEach(model.onDisk) { folder in
                         Section {
-                            ForEach(folder.files) { LocalFileRow(file: $0) }
+                            ForEach(folder.files) { LocalFileRow(file: $0, folder: folder) }
                         } header: {
                             HStack {
                                 Text(folder.name)
@@ -70,6 +70,7 @@ struct DownloadsView: View {
 struct LocalFileRow: View {
     @Environment(AppModel.self) private var model
     let file: LocalFile
+    let folder: PodcastFolder
 
     var body: some View {
         HStack(spacing: 12) {
@@ -83,16 +84,17 @@ struct LocalFileRow: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Button("Play", systemImage: "play.circle") { model.play(file.url) }
+            Button("Play", systemImage: "play.circle") { model.play(file, in: folder) }
                 .labelStyle(.iconOnly).buttonStyle(.borderless)
             Button("Show in Finder", systemImage: "magnifyingglass.circle") { model.revealInFinder(file.url) }
                 .labelStyle(.iconOnly).buttonStyle(.borderless)
         }
         .padding(.vertical, 3)
         .contentShape(Rectangle())
-        .onTapGesture(count: 2) { model.play(file.url) }
+        .onTapGesture(count: 2) { model.play(file, in: folder) }
         .contextMenu {
-            Button("Play") { model.play(file.url) }
+            Button("Play") { model.play(file, in: folder) }
+            Button("Open in External App") { model.openExternally(file.url) }
             Button("Show in Finder") { model.revealInFinder(file.url) }
             Divider()
             Button("Move to Trash", role: .destructive) { model.trash(file) }
@@ -151,7 +153,7 @@ struct DownloadRow: View {
             Button("Cancel", systemImage: "xmark.circle") { model.cancelDownload(item.id) }
                 .labelStyle(.iconOnly).buttonStyle(.borderless)
         case .finished:
-            Button("Play", systemImage: "play.circle") { model.play(item.destination) }
+            Button("Play", systemImage: "play.circle") { model.play(item.episode, from: item.podcast) }
                 .labelStyle(.iconOnly).buttonStyle(.borderless)
         case .failed, .cancelled:
             Button("Retry") { model.download(item.episode, from: item.podcast) }

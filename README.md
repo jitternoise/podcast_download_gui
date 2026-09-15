@@ -11,9 +11,13 @@ downloading episodes to a folder of your choosing.
   automatically download new ones each time it refreshes.
 - **Download** individual episodes or an entire back catalog, with a concurrent
   download queue and per-episode progress.
-- **Double-click to play** — double-clicking an episode plays it in your default
-  audio app; if it isn't downloaded yet it's fetched first and plays automatically
-  when the download finishes.
+- **Built-in player** — double-click an episode to play it in the player bar at
+  the bottom of the window: play/pause, 10-second skip back/forward, scrubber,
+  playback speed (0.75×–2×), and it remembers where you left off in each episode.
+  Works with the keyboard media keys and Control Center's Now Playing. If an
+  episode isn't downloaded yet, it's fetched first and starts playing
+  automatically. "Open in External App" is in the right-click menu if you'd
+  rather use Music or another player.
 - **One folder, always** — you pick a single master folder and every podcast
   gets its own sub-folder named after the show. Change the folder in Settings
   and the app moves your whole library there. The Downloads tab shows exactly
@@ -64,6 +68,7 @@ Sources/PodcastDownloader/
     FeedParser.swift              RSS 2.0 + iTunes-extension parser
     PodcastSearchService.swift    Apple Podcasts search API client
     DownloadManager.swift         URLSession download queue
+    Player.swift                  AVPlayer-based audio player + media keys
   Views/                          SwiftUI screens
 ```
 
@@ -74,6 +79,16 @@ Sources/PodcastDownloader/
 | Downloaded audio | Master folder (default `~/Downloads/Podcasts`, change in **Settings ⌘,**) |
 | Subscriptions & episode cache | `~/Library/Application Support/PodcastDownloader/library.json` (download locations stored relative to the master folder) |
 | Preferences | `UserDefaults` |
+
+## Keyboard shortcuts
+
+| Action | Shortcut |
+|---|---|
+| Play / Pause | ⌥ Space (or the keyboard's play key) |
+| Back / forward 10 s | ⌥⌘← / ⌥⌘→ |
+| Stop | ⌘. |
+| Refresh all subscriptions | ⌘R |
+| Settings | ⌘, |
 
 ## Tests
 

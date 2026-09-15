@@ -10,6 +10,7 @@ final class AppModel {
     let settings = AppSettings()
     let library = Library()
     let downloads = DownloadManager()
+    let player = Player()
 
     /// What's actually in the master folder right now (see `rescanDisk`).
     private(set) var onDisk: [PodcastFolder] = []
@@ -28,9 +29,17 @@ final class AppModel {
             guard let self else { return }
             library.markDownloaded(episode, relativePath: relativePath(of: url))
             rescanDisk()
-            if playWhenFinished.remove(episode.id) != nil {
-                play(url)
+            if playWhenFinished.remove(episode.id) != nil,
+               let podcast = downloads.item(for: episode)?.podcast {
+                play(episode, from: podcast)
             }
+        }
+        player.onPositionUpdate = { [weak self] episode, seconds in
+            self?.library.setPlaybackPosition(seconds, for: episode)
+        }
+        player.onFinished = { [weak self] episode in
+            // Finished episodes start from the beginning next time.
+            self?.library.setPlaybackPosition(0, for: episode)
         }
         rescanDisk()
     }
@@ -123,12 +132,40 @@ final class AppModel {
     /// Double-click behaviour: play immediately if the file exists, otherwise
     /// download it and play when the download completes.
     func downloadAndPlay(_ episode: Episode, from podcast: Podcast) {
-        if let file = localFile(for: episode, in: podcast) {
-            play(file)
+        if localFile(for: episode, in: podcast) != nil {
+            play(episode, from: podcast)
             return
         }
         playWhenFinished.insert(episode.id)
         download(episode, from: podcast)
+    }
+
+    // MARK: Playback
+
+    /// Plays a downloaded episode in the built-in player, resuming where it left off.
+    func play(_ episode: Episode, from podcast: Podcast) {
+        guard let file = localFile(for: episode, in: podcast) else { return }
+        let saved = library.playbackPosition(for: episode)
+        player.play(episode, from: podcast, file: file, startAt: saved > 5 ? saved : 0)
+    }
+
+    /// Plays a file found on disk (Downloads tab). Matches it back to a known
+    /// episode when possible so the resume position is shared.
+    func play(_ file: LocalFile, in folder: PodcastFolder) {
+        let podcast = library.podcasts.first { $0.folderName == folder.name }
+            ?? Podcast(title: folder.name, author: "", feedURL: folder.url, artworkURL: nil)
+        let episode = podcast.id == folder.url.absoluteString ? nil
+            : library.episodes(for: podcast).first { localFile(for: $0, in: podcast) == file.url }
+        let resolved = episode ?? Episode(
+            id: file.url.path, title: file.name, summary: "", publishedAt: file.modified,
+            enclosureURL: file.url, enclosureLength: file.size, mimeType: nil, duration: nil
+        )
+        let saved = library.playbackPosition(for: resolved)
+        player.play(resolved, from: podcast, file: file.url, startAt: saved > 5 ? saved : 0)
+    }
+
+    func isCurrentlyLoaded(_ episode: Episode) -> Bool {
+        player.episode?.id == episode.id
     }
 
     func cancelDownload(_ id: String) {
@@ -141,7 +178,8 @@ final class AppModel {
         downloads.cancelAll()
     }
 
-    func play(_ url: URL) {
+    /// Hands the file to whatever app the user has set for that file type.
+    func openExternally(_ url: URL) {
         NSWorkspace.shared.open(url)
     }
 

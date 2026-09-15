@@ -192,7 +192,8 @@ struct EpisodeRow: View {
         .help(localFile == nil ? "Double-click to download and play" : "Double-click to play")
         .contextMenu {
             if let localFile {
-                Button("Play") { model.play(localFile) }
+                Button("Play") { model.play(episode, from: podcast) }
+                Button("Open in External App") { model.openExternally(localFile) }
                 Button("Show in Finder") { model.revealInFinder(localFile) }
                 Divider()
                 Button("Download Again") { model.download(episode, from: podcast) }
@@ -212,9 +213,15 @@ struct EpisodeRow: View {
     private var trailing: some View {
         if let localFile {
             HStack(spacing: 6) {
-                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                if model.isCurrentlyLoaded(episode) {
+                    Image(systemName: model.player.isPlaying ? "speaker.wave.2.fill" : "speaker.fill")
+                        .foregroundStyle(.tint)
+                        .help("Now playing")
+                } else {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                }
                 Button {
-                    model.play(localFile)
+                    model.play(episode, from: podcast)
                 } label: {
                     Image(systemName: "play.circle")
                 }
