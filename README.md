@@ -18,6 +18,10 @@ downloading episodes to a folder of your choosing.
   episode isn't downloaded yet, it's fetched first and starts playing
   automatically. "Open in External App" is in the right-click menu if you'd
   rather use Music or another player.
+- **Mini player** — the ⤡ button on the player bar (or ⇧⌘M) collapses the whole
+  window down to a small always-movable player with artwork, scrubber, and
+  transport controls; pin it to keep it above other windows. ⤢ brings the full
+  window back exactly where it was.
 - **One folder, always** — you pick a single master folder and every podcast
   gets its own sub-folder named after the show. Change the folder in Settings
   and the app moves your whole library there. The Downloads tab shows exactly
@@ -69,6 +73,7 @@ Sources/PodcastDownloader/
     PodcastSearchService.swift    Apple Podcasts search API client
     DownloadManager.swift         URLSession download queue
     Player.swift                  AVPlayer-based audio player + media keys
+    WindowMode.swift              Full window <-> mini player switching
   Views/                          SwiftUI screens
 ```
 
@@ -87,6 +92,7 @@ Sources/PodcastDownloader/
 | Play / Pause | ⌥ Space (or the keyboard's play key) |
 | Back / forward 10 s | ⌥⌘← / ⌥⌘→ |
 | Stop | ⌘. |
+| Mini player / full window | ⇧⌘M |
 | Refresh all subscriptions | ⌘R |
 | Settings | ⌘, |
 

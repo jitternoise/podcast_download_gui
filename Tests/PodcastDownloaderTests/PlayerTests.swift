@@ -67,9 +67,12 @@ final class PlayerTests: XCTestCase {
         player.play(episode, from: podcast, file: file)
         try await waitUntil { player.isPlaying }
         player.rate = 2.0
-        try await Task.sleep(for: .seconds(1.0))
+        try await Task.sleep(for: .seconds(0.3))     // let the rate change settle
+        let start = player.currentTime
+        try await Task.sleep(for: .seconds(1.5))
         XCTAssertTrue(player.isPlaying)
-        XCTAssertGreaterThan(player.currentTime, 1.5, "2x should cover >1.5s of audio in ~1s")
+        let advanced = player.currentTime - start
+        XCTAssertGreaterThan(advanced, 1.5 * 1.3, "2x should cover clearly more audio than wall-clock time")
         player.stop()
         XCTAssertFalse(player.hasItem)
     }

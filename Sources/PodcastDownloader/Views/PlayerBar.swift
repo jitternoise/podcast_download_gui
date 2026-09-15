@@ -1,83 +1,158 @@
 import SwiftUI
 
-/// Persistent playback controls docked at the bottom of the window.
+/// Persistent playback controls docked at the bottom of the full window.
 struct PlayerBar: View {
     @Environment(AppModel.self) private var model
 
-    @State private var isScrubbing = false
-    @State private var scrubValue: Double = 0
-
-    private var player: Player { model.player }
-
     var body: some View {
         HStack(spacing: 16) {
-            nowPlaying
+            NowPlayingLabel(artworkSize: 44)
                 .frame(width: 240, alignment: .leading)
 
-            transport
+            TransportButtons(playSize: 36, skipSize: 20)
 
-            scrubber
+            Scrubber()
 
-            speedMenu
+            SpeedMenu()
+
+            Button {
+                model.windowMode.collapse()
+            } label: {
+                Image(systemName: "arrow.down.right.and.arrow.up.left")
+            }
+            .buttonStyle(.borderless)
+            .help("Switch to Mini Player (⇧⌘M)")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .background(.bar)
         .overlay(alignment: .top) { Divider() }
     }
+}
 
-    // MARK: Pieces
+/// Compact layout used when the window is collapsed to just the player.
+struct MiniPlayerView: View {
+    @Environment(AppModel.self) private var model
 
-    private var nowPlaying: some View {
+    var body: some View {
+        @Bindable var windowMode = model.windowMode
+
+        HStack(alignment: .top, spacing: 12) {
+            ArtworkView(url: model.player.podcast?.artworkURL, size: 96)
+
+            VStack(spacing: 6) {
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(model.player.episode?.title ?? "Nothing playing")
+                            .font(.headline)
+                            .lineLimit(1)
+                        Text(model.player.podcast?.title ?? "")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 8)
+                    Toggle(isOn: $windowMode.keepOnTop) {
+                        Image(systemName: windowMode.keepOnTop ? "pin.fill" : "pin")
+                    }
+                    .toggleStyle(.button)
+                    .buttonStyle(.borderless)
+                    .help(windowMode.keepOnTop ? "Stop keeping on top" : "Keep on top of other windows")
+                    Button {
+                        model.windowMode.expand()
+                    } label: {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Back to full window (⇧⌘M)")
+                }
+
+                Scrubber()
+
+                HStack(spacing: 12) {
+                    Spacer()
+                    TransportButtons(playSize: 30, skipSize: 18)
+                    Spacer()
+                    SpeedMenu()
+                }
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(.bar)
+    }
+}
+
+// MARK: - Shared pieces
+
+struct NowPlayingLabel: View {
+    @Environment(AppModel.self) private var model
+    var artworkSize: CGFloat
+
+    var body: some View {
         HStack(spacing: 10) {
-            ArtworkView(url: player.podcast?.artworkURL, size: 44)
+            ArtworkView(url: model.player.podcast?.artworkURL, size: artworkSize)
             VStack(alignment: .leading, spacing: 2) {
-                Text(player.episode?.title ?? "Nothing playing")
+                Text(model.player.episode?.title ?? "Nothing playing")
                     .font(.headline)
                     .lineLimit(1)
-                Text(player.podcast?.title ?? "Double-click an episode to play it")
+                Text(model.player.podcast?.title ?? "Double-click an episode to play it")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
         }
     }
+}
 
-    private var transport: some View {
+struct TransportButtons: View {
+    @Environment(AppModel.self) private var model
+    var playSize: CGFloat
+    var skipSize: CGFloat
+
+    private var player: Player { model.player }
+
+    var body: some View {
         HStack(spacing: 18) {
             Button { player.skipBackward() } label: {
                 Image(systemName: "gobackward.\(Int(Player.skipInterval))")
-                    .font(.system(size: 20))
+                    .font(.system(size: skipSize))
             }
             .help("Back \(Int(Player.skipInterval)) seconds")
 
             Button { player.togglePlayPause() } label: {
                 Image(systemName: player.isPlaying ? "pause.circle.fill" : "play.circle.fill")
-                    .font(.system(size: 36))
+                    .font(.system(size: playSize))
             }
             .help(player.isPlaying ? "Pause" : "Play")
 
             Button { player.skipForward() } label: {
                 Image(systemName: "goforward.\(Int(Player.skipInterval))")
-                    .font(.system(size: 20))
+                    .font(.system(size: skipSize))
             }
             .help("Forward \(Int(Player.skipInterval)) seconds")
         }
         .buttonStyle(.borderless)
         .disabled(!player.hasItem)
     }
+}
 
-    private var scrubber: some View {
+struct Scrubber: View {
+    @Environment(AppModel.self) private var model
+    @State private var isScrubbing = false
+    @State private var scrubValue: Double = 0
+
+    private var player: Player { model.player }
+    private var shown: Double { isScrubbing ? scrubValue : player.currentTime }
+
+    var body: some View {
         HStack(spacing: 8) {
-            Text(timeString(isScrubbing ? scrubValue : player.currentTime))
+            Text(TimeText.format(shown))
                 .monospacedDigit()
                 .frame(width: 52, alignment: .trailing)
 
             Slider(
-                value: Binding(
-                    get: { isScrubbing ? scrubValue : player.currentTime },
-                    set: { scrubValue = $0 }
-                ),
+                value: Binding(get: { shown }, set: { scrubValue = $0 }),
                 in: 0...max(player.duration, 1)
             ) { editing in
                 if editing {
@@ -90,7 +165,7 @@ struct PlayerBar: View {
             }
             .disabled(!player.hasItem || player.duration == 0)
 
-            Text("-" + timeString(player.duration - (isScrubbing ? scrubValue : player.currentTime)))
+            Text("-" + TimeText.format(player.duration - shown))
                 .monospacedDigit()
                 .frame(width: 60, alignment: .leading)
         }
@@ -98,22 +173,26 @@ struct PlayerBar: View {
         .foregroundStyle(.secondary)
         .frame(maxWidth: .infinity)
     }
+}
 
-    private var speedMenu: some View {
+struct SpeedMenu: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
         Menu {
             ForEach(Player.rates, id: \.self) { rate in
                 Button {
-                    player.rate = rate
+                    model.player.rate = rate
                 } label: {
-                    if rate == player.rate {
-                        Label(rateLabel(rate), systemImage: "checkmark")
+                    if rate == model.player.rate {
+                        Label(TimeText.rate(rate), systemImage: "checkmark")
                     } else {
-                        Text(rateLabel(rate))
+                        Text(TimeText.rate(rate))
                     }
                 }
             }
         } label: {
-            Text(rateLabel(player.rate))
+            Text(TimeText.rate(model.player.rate))
                 .monospacedDigit()
                 .frame(width: 44)
         }
@@ -121,17 +200,17 @@ struct PlayerBar: View {
         .fixedSize()
         .help("Playback speed")
     }
+}
 
-    // MARK: Formatting
-
-    private func timeString(_ seconds: Double) -> String {
+enum TimeText {
+    static func format(_ seconds: Double) -> String {
         guard seconds.isFinite, seconds >= 0 else { return "0:00" }
         let s = Int(seconds.rounded())
         let h = s / 3600, m = (s % 3600) / 60, sec = s % 60
         return h > 0 ? String(format: "%d:%02d:%02d", h, m, sec) : String(format: "%d:%02d", m, sec)
     }
 
-    private func rateLabel(_ rate: Float) -> String {
+    static func rate(_ rate: Float) -> String {
         rate == rate.rounded() ? "\(Int(rate))×" : String(format: "%.2g×", rate)
     }
 }

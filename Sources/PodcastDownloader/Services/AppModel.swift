@@ -11,6 +11,7 @@ final class AppModel {
     let library = Library()
     let downloads = DownloadManager()
     let player = Player()
+    let windowMode = WindowMode()
 
     /// What's actually in the master folder right now (see `rescanDisk`).
     private(set) var onDisk: [PodcastFolder] = []

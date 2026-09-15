@@ -7,11 +7,11 @@ struct PodcastDownloaderApp: App {
     @State private var model = AppModel()
 
     var body: some Scene {
-        WindowGroup("Podcast Downloader") {
-            ContentView()
+        Window("Podcast Downloader", id: "main") {
+            RootView()
                 .environment(model)
-                .frame(minWidth: 900, minHeight: 560)
         }
+        .windowResizability(.contentSize)
         .commands {
             CommandGroup(after: .newItem) {
                 Button("Refresh All Subscriptions") { Task { await model.refreshAll() } }
@@ -31,6 +31,11 @@ struct PodcastDownloaderApp: App {
                 Button("Stop") { model.player.stop() }
                     .keyboardShortcut(".", modifiers: .command)
                     .disabled(!model.player.hasItem)
+                Divider()
+                Button(model.windowMode.isMini ? "Switch to Full Window" : "Switch to Mini Player") {
+                    model.windowMode.toggle()
+                }
+                .keyboardShortcut("m", modifiers: [.command, .shift])
             }
         }
 
