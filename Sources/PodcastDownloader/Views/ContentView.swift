@@ -20,9 +20,6 @@ struct ContentView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             PlayerBar()
         }
-        .task {
-            await model.refreshAllIfDue()
-        }
     }
 
     private var sidebar: some View {

@@ -212,9 +212,13 @@ final class AppModel {
         library.markFullRefresh()
     }
 
-    /// Automatic refresh (launch): only runs if the last full refresh is older
-    /// than the interval chosen in Settings.
-    func refreshAllIfDue() async {
+    private var didRunLaunchRefresh = false
+
+    /// Automatic refresh at launch: runs at most once per app session, and only
+    /// if the last full refresh is older than the interval chosen in Settings.
+    func refreshOnLaunchIfDue() async {
+        guard !didRunLaunchRefresh else { return }
+        didRunLaunchRefresh = true
         guard RefreshPolicy.isDue(lastFullRefresh: library.lastFullRefresh,
                                   minimumMinutes: settings.autoRefreshMinutes) else { return }
         await refreshAll()

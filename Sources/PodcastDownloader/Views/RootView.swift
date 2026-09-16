@@ -19,6 +19,11 @@ struct RootView: View {
         .background(WindowAccessor { window in
             model.windowMode.window = window
         })
+        // RootView lives for the whole app session (it is not rebuilt when
+        // switching to/from the mini player), so this fires exactly once.
+        .task {
+            await model.refreshOnLaunchIfDue()
+        }
     }
 }
 
