@@ -41,6 +41,23 @@ struct SettingsView: View {
                 }
             }
 
+            Section("Refreshing") {
+                Picker("Check for new episodes at most every", selection: $settings.autoRefreshMinutes) {
+                    ForEach(RefreshPolicy.options, id: \.minutes) { option in
+                        Text(option.label).tag(option.minutes)
+                    }
+                }
+                Text("Applies to the automatic refresh when the app launches. Refresh All (⌘R) always checks immediately.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let last = model.library.lastFullRefresh {
+                    LabeledContent("Last full refresh") {
+                        Text(last, format: .dateTime.month(.abbreviated).day().hour().minute())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
             Section("Downloads") {
                 Stepper("Simultaneous downloads: \(settings.maxConcurrentDownloads)",
                         value: $settings.maxConcurrentDownloads, in: 1...10)

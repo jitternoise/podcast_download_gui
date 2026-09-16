@@ -22,6 +22,7 @@ final class Library {
         var downloaded: [String: String]
         var lastRefreshed: [String: Date]
         var playbackPositions: [String: Double]?
+        var lastFullRefresh: Date?
     }
 
     private(set) var podcasts: [Podcast] = []
@@ -29,6 +30,7 @@ final class Library {
     private(set) var downloaded: [String: String] = [:]      // episode id -> path relative to master folder
     private(set) var lastRefreshed: [String: Date] = [:]     // podcast id -> date
     private(set) var playbackPositions: [String: Double] = [:] // episode id -> seconds listened to
+    private(set) var lastFullRefresh: Date?                    // when every subscription was last refreshed together
     private(set) var refreshing: Set<String> = []
     var refreshErrors: [String: String] = [:]                // podcast id -> last error
 
@@ -108,6 +110,11 @@ final class Library {
 
     func markDownloaded(_ episode: Episode, relativePath: String) {
         downloaded[episode.id] = relativePath
+        save()
+    }
+
+    func markFullRefresh(at date: Date = Date()) {
+        lastFullRefresh = date
         save()
     }
 
@@ -194,6 +201,7 @@ final class Library {
         downloaded = snap.downloaded
         lastRefreshed = snap.lastRefreshed
         playbackPositions = snap.playbackPositions ?? [:]
+        lastFullRefresh = snap.lastFullRefresh
     }
 
     private func save() {
@@ -202,7 +210,8 @@ final class Library {
             episodes: episodes.filter { key, _ in podcasts.contains { $0.id == key } },
             downloaded: downloaded,
             lastRefreshed: lastRefreshed,
-            playbackPositions: playbackPositions
+            playbackPositions: playbackPositions,
+            lastFullRefresh: lastFullRefresh
         )
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601

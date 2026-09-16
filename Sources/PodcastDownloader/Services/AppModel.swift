@@ -201,12 +201,23 @@ final class AppModel {
         }
     }
 
+    /// Manual "refresh everything" — always runs.
     func refreshAll() async {
+        guard !library.podcasts.isEmpty else { return }
         await withTaskGroup(of: Void.self) { group in
             for podcast in library.podcasts {
                 group.addTask { await self.refresh(podcast) }
             }
         }
+        library.markFullRefresh()
+    }
+
+    /// Automatic refresh (launch): only runs if the last full refresh is older
+    /// than the interval chosen in Settings.
+    func refreshAllIfDue() async {
+        guard RefreshPolicy.isDue(lastFullRefresh: library.lastFullRefresh,
+                                  minimumMinutes: settings.autoRefreshMinutes) else { return }
+        await refreshAll()
     }
 
     // MARK: Finder helpers

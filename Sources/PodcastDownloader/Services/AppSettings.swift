@@ -7,6 +7,7 @@ final class AppSettings {
     private enum Keys {
         static let masterDirectory = "masterDirectory"
         static let maxConcurrentDownloads = "maxConcurrentDownloads"
+        static let autoRefreshMinutes = "autoRefreshMinutes"
     }
 
     static let defaultMasterDirectory = FileManager.default
@@ -22,6 +23,11 @@ final class AppSettings {
         didSet { UserDefaults.standard.set(maxConcurrentDownloads, forKey: Keys.maxConcurrentDownloads) }
     }
 
+    /// Minimum gap between automatic refresh-all runs (see `RefreshPolicy`).
+    var autoRefreshMinutes: Int {
+        didSet { UserDefaults.standard.set(autoRefreshMinutes, forKey: Keys.autoRefreshMinutes) }
+    }
+
     init() {
         let defaults = UserDefaults.standard
         if let path = defaults.string(forKey: Keys.masterDirectory), !path.isEmpty {
@@ -31,6 +37,7 @@ final class AppSettings {
         }
         let stored = defaults.integer(forKey: Keys.maxConcurrentDownloads)
         maxConcurrentDownloads = stored == 0 ? 3 : max(1, min(stored, 10))
+        autoRefreshMinutes = defaults.object(forKey: Keys.autoRefreshMinutes) as? Int ?? 60
     }
 
     func folder(for podcast: Podcast) -> URL {

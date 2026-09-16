@@ -8,7 +8,9 @@ downloading episodes to a folder of your choosing.
 - **Search** the Apple Podcasts directory by name, host, or topic — or paste any
   RSS feed URL directly.
 - **Subscribe** to shows; the app keeps track of their episodes and can
-  automatically download new ones each time it refreshes.
+  automatically download new ones each time it refreshes. Feeds are refreshed
+  automatically at launch, but no more often than the interval you choose in
+  Settings (default: once an hour). Refresh All (⌘R) always checks immediately.
 - **Latest Episodes** — one list of the 100 newest episodes across every
   subscription, newest first, so you can see what's new without clicking
   through each show.
@@ -72,6 +74,7 @@ Sources/PodcastDownloader/
     AppSettings.swift             Master folder + concurrency (UserDefaults)
     Library.swift                 Subscriptions & episode cache (JSON on disk)
     LibraryFolder.swift           Scans / relocates the master folder
+    RefreshPolicy.swift           Throttle for automatic feed refreshes
     FeedParser.swift              RSS 2.0 + iTunes-extension parser
     PodcastSearchService.swift    Apple Podcasts search API client
     DownloadManager.swift         URLSession download queue

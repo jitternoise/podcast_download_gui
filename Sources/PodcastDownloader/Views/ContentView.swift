@@ -21,7 +21,7 @@ struct ContentView: View {
             PlayerBar()
         }
         .task {
-            await model.refreshAll()
+            await model.refreshAllIfDue()
         }
     }
 
@@ -67,10 +67,15 @@ struct ContentView: View {
                 } label: {
                     Label("Refresh All", systemImage: "arrow.clockwise")
                 }
-                .disabled(model.library.podcasts.isEmpty)
+                .disabled(model.library.podcasts.isEmpty || !model.library.refreshing.isEmpty)
                 Spacer()
                 if !model.library.refreshing.isEmpty {
                     ProgressView().controlSize(.small)
+                } else if let last = model.library.lastFullRefresh {
+                    Text("Updated \(last, style: .relative) ago")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .help("Automatic refresh: \(RefreshPolicy.label(forMinutes: model.settings.autoRefreshMinutes).lowercased())")
                 }
             }
             .padding(10)
