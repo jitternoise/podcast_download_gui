@@ -1,29 +1,26 @@
 import AppKit
 import SwiftUI
 
-/// Chooses between the full app UI and the mini player, and hands the
-/// NSWindow to `WindowMode` so it can resize and restyle it.
+/// Hosts the full UI and hands the NSWindow to `WindowMode`, which shows a
+/// separate mini-player window on demand without disturbing this one.
 struct RootView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        Group {
-            if model.windowMode.isMini {
-                MiniPlayerView()
-                    .frame(width: WindowMode.miniContentSize.width, height: WindowMode.miniContentSize.height)
-            } else {
-                ContentView()
-                    .frame(minWidth: 900, minHeight: 560)
+        ContentView()
+            .frame(minWidth: 900, minHeight: 560)
+            .background(WindowAccessor { window in
+                model.windowMode.mainWindow = window
+            })
+            .onAppear {
+                model.windowMode.makeMiniContent = {
+                    NSHostingView(rootView: MiniPlayerView().environment(model))
+                }
             }
-        }
-        .background(WindowAccessor { window in
-            model.windowMode.window = window
-        })
-        // RootView lives for the whole app session (it is not rebuilt when
-        // switching to/from the mini player), so this fires exactly once.
-        .task {
-            await model.refreshOnLaunchIfDue()
-        }
+            // RootView lives for the whole app session, so this fires exactly once.
+            .task {
+                await model.refreshOnLaunchIfDue()
+            }
     }
 }
 

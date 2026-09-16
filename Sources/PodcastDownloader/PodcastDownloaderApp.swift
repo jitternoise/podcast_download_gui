@@ -11,7 +11,6 @@ struct PodcastDownloaderApp: App {
             RootView()
                 .environment(model)
         }
-        .windowResizability(.contentSize)
         .commands {
             CommandGroup(after: .newItem) {
                 Button("Refresh All Subscriptions") { Task { await model.refreshAll() } }

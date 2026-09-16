@@ -79,6 +79,7 @@ struct MiniPlayerView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
+        .frame(width: WindowMode.miniContentSize.width, height: WindowMode.miniContentSize.height)
         .background(.bar)
     }
 }
