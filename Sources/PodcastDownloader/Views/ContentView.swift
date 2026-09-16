@@ -3,6 +3,7 @@ import SwiftUI
 enum SidebarItem: Hashable {
     case search
     case downloads
+    case latest
     case podcast(String)
 }
 
@@ -32,6 +33,8 @@ struct ContentView: View {
                 Label("Downloads", systemImage: "arrow.down.circle")
                     .badge(model.downloads.activeItems.count)
                     .tag(SidebarItem.downloads)
+                Label("Latest Episodes", systemImage: "clock")
+                    .tag(SidebarItem.latest)
             }
 
             Section("Subscriptions") {
@@ -82,6 +85,8 @@ struct ContentView: View {
             SearchView()
         case .downloads:
             DownloadsView()
+        case .latest:
+            LatestEpisodesView()
         case .podcast(let id):
             if let podcast = model.library.podcast(withID: id) {
                 NavigationStack {

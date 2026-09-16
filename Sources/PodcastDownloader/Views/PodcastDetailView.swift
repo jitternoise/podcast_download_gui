@@ -156,15 +156,24 @@ struct EpisodeRow: View {
     @Environment(AppModel.self) private var model
     let episode: Episode
     let podcast: Podcast
+    /// Show the podcast's artwork and name — used in cross-podcast lists.
+    var showPodcast = false
 
     private var localFile: URL? { model.localFile(for: episode, in: podcast) }
     private var downloadItem: DownloadItem? { model.downloads.item(for: episode) }
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
+            if showPodcast {
+                ArtworkView(url: podcast.artworkURL, size: 44)
+            }
             VStack(alignment: .leading, spacing: 3) {
                 Text(episode.title).font(.headline).lineLimit(2)
                 HStack(spacing: 6) {
+                    if showPodcast {
+                        Text(podcast.title).lineLimit(1)
+                        Text("·")
+                    }
                     if let date = episode.publishedAt {
                         Text(date, format: .dateTime.year().month(.abbreviated).day())
                     }

@@ -1,6 +1,13 @@
 import Foundation
 import Observation
 
+/// An episode together with the podcast it belongs to.
+struct EpisodeRef: Identifiable, Hashable {
+    let episode: Episode
+    let podcast: Podcast
+    var id: String { podcast.id + "|" + episode.id }
+}
+
 /// Subscriptions, cached episodes, and the record of what has been downloaded.
 /// Persisted as a single JSON file in ~/Library/Application Support.
 ///
@@ -27,11 +34,16 @@ final class Library {
 
     private let fileURL: URL
 
-    init() {
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("PodcastDownloader", isDirectory: true)
-        try? FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
-        fileURL = support.appendingPathComponent("library.json")
+    /// - Parameter fileURL: where to persist; defaults to Application Support. Tests pass a temp file.
+    init(fileURL: URL? = nil) {
+        if let fileURL {
+            self.fileURL = fileURL
+        } else {
+            let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("PodcastDownloader", isDirectory: true)
+            try? FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
+            self.fileURL = support.appendingPathComponent("library.json")
+        }
         load()
     }
 
@@ -47,6 +59,23 @@ final class Library {
 
     func episodes(for podcast: Podcast) -> [Episode] {
         episodes[podcast.id] ?? []
+    }
+
+    /// The newest episodes across every subscription, newest first.
+    /// Episodes without a publish date sort last.
+    func latestEpisodes(limit: Int = 100) -> [EpisodeRef] {
+        podcasts
+            .flatMap { podcast in episodes(for: podcast).map { EpisodeRef(episode: $0, podcast: podcast) } }
+            .sorted { a, b in
+                switch (a.episode.publishedAt, b.episode.publishedAt) {
+                case let (x?, y?): return x > y
+                case (nil, _?): return false
+                case (_?, nil): return true
+                case (nil, nil): return a.episode.title < b.episode.title
+                }
+            }
+            .prefix(limit)
+            .map { $0 }
     }
 
     /// Path relative to the master folder where this episode was saved, if known.

@@ -9,6 +9,9 @@ downloading episodes to a folder of your choosing.
   RSS feed URL directly.
 - **Subscribe** to shows; the app keeps track of their episodes and can
   automatically download new ones each time it refreshes.
+- **Latest Episodes** — one list of the 100 newest episodes across every
+  subscription, newest first, so you can see what's new without clicking
+  through each show.
 - **Download** individual episodes or an entire back catalog, with a concurrent
   download queue and per-episode progress.
 - **Built-in player** — double-click an episode to play it in the player bar at
