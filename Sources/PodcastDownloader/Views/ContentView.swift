@@ -12,12 +12,15 @@ struct ContentView: View {
     @State private var selection: SidebarItem? = .search
 
     var body: some View {
-        NavigationSplitView {
-            sidebar
-        } detail: {
-            detail
-        }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
+        // The player bar sits *below* the split view rather than as a
+        // safe-area inset over it: on macOS the inset doesn't reach into the
+        // detail column's List, so the last rows would scroll underneath it.
+        VStack(spacing: 0) {
+            NavigationSplitView {
+                sidebar
+            } detail: {
+                detail
+            }
             PlayerBar()
         }
     }
