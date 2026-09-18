@@ -25,6 +25,9 @@ final class WindowMode {
 
     private(set) var miniWindow: NSWindow?
     private var miniCloseObserver: NSObjectProtocol?
+    /// Bumped on every collapse/expand so a fade that finishes after the mode
+    /// has already flipped again doesn't apply its stale end state.
+    private var transition = 0
 
     func toggle() {
         isMini ? expand() : collapse()
@@ -53,20 +56,27 @@ final class WindowMode {
         mini.setFrameOrigin(NSPoint(x: main.frame.minX, y: main.frame.maxY - size.height))
 
         // Closing the mini window with its red button brings the main window back.
+        // This must happen synchronously, inside the close: the main window is
+        // ordered out, so if the mini window finished closing first the app
+        // would have no visible windows and would terminate (see AppDelegate).
         miniCloseObserver = NotificationCenter.default.addObserver(
-            forName: NSWindow.willCloseNotification, object: mini, queue: .main
+            forName: NSWindow.willCloseNotification, object: mini, queue: nil
         ) { [weak self] _ in
-            Task { @MainActor in self?.expand(closingMini: false) }
+            MainActor.assumeIsolated { self?.expand(closingMini: false) }
         }
         miniWindow = mini
 
+        transition += 1
+        let generation = transition
         mini.alphaValue = 0
         mini.makeKeyAndOrderFront(nil)
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = Self.fadeDuration
             main.animator().alphaValue = 0
             mini.animator().alphaValue = 1
-        }, completionHandler: {
+        }, completionHandler: { [weak self] in
+            // If expand() ran during the fade it owns the main window now.
+            guard self?.transition == generation else { return }
             main.orderOut(nil)
             main.alphaValue = 1
         })
@@ -85,13 +95,18 @@ final class WindowMode {
         let mini = miniWindow
         miniWindow = nil
 
-        main.alphaValue = 0
+        transition += 1
+        // Start from wherever the collapse fade left the main window: it may be
+        // fully hidden, or still mid-fade if the user toggled quickly.
+        if !main.isVisible { main.alphaValue = 0 }
         main.makeKeyAndOrderFront(nil)
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = Self.fadeDuration
             main.animator().alphaValue = 1
             mini?.animator().alphaValue = 0
         }, completionHandler: {
+            // The old mini window is ours to close whatever happened since;
+            // a newer collapse() has its own window.
             if closingMini { mini?.close() }
         })
     }

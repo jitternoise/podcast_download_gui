@@ -142,7 +142,10 @@ final class FeedParser: NSObject, XMLParserDelegate {
 
     private func finishItem() {
         // Episodes without an audio/video enclosure can't be downloaded; skip them.
-        guard let enclosure = itemEnclosureURL, let url = URL(string: enclosure) else { return }
+        // Only web URLs are accepted: a feed must not be able to point the
+        // downloader at file:// or other local schemes.
+        guard let enclosure = itemEnclosureURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+              let url = URL(string: enclosure), url.isWebURL else { return }
         let id = itemGUID.isEmpty ? enclosure : itemGUID
         let summary = itemSummary.isEmpty ? itemDescription : itemSummary
         feed.episodes.append(Episode(
@@ -155,6 +158,14 @@ final class FeedParser: NSObject, XMLParserDelegate {
             mimeType: itemEnclosureType,
             duration: itemDuration.isEmpty ? nil : itemDuration
         ))
+    }
+}
+
+extension URL {
+    /// True for http(s) URLs with a host — the only kind the app will fetch.
+    var isWebURL: Bool {
+        guard let scheme = scheme?.lowercased(), let host, !host.isEmpty else { return false }
+        return scheme == "http" || scheme == "https"
     }
 }
 

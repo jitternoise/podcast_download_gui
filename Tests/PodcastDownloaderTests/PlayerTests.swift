@@ -77,6 +77,33 @@ final class PlayerTests: XCTestCase {
         XCTAssertFalse(player.hasItem)
     }
 
+    func testFinishedEpisodeSavesZeroAndReplaysFromTheStart() async throws {
+        let short = FileManager.default.temporaryDirectory.appendingPathComponent("short-\(UUID().uuidString).wav")
+        try Self.makeWAV(seconds: 1, to: short)
+        defer { try? FileManager.default.removeItem(at: short) }
+
+        let player = Player()
+        var reported: [Double] = []
+        var finished = false
+        player.onPositionUpdate = { _, seconds in reported.append(seconds) }
+        player.onFinished = { _ in finished = true }
+
+        player.play(episode, from: podcast, file: short)
+        try await waitUntil { finished }
+        XCTAssertFalse(player.isPlaying)
+
+        // Anything persisted after the end — e.g. on quit, or when another
+        // episode is started — must be 0, not the full duration.
+        player.flushPosition()
+        XCTAssertEqual(reported.last, 0)
+
+        player.resume()
+        try await Task.sleep(for: .seconds(0.3))
+        XCTAssertTrue(player.isPlaying)
+        XCTAssertLessThan(player.currentTime, 0.9, "resuming a finished episode starts over")
+        player.stop()
+    }
+
     // MARK: Helpers
 
     private func waitUntil(timeout: Double = 5, _ condition: @escaping () -> Bool) async throws {

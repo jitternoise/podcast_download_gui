@@ -60,6 +60,49 @@ final class LibraryFolderTests: XCTestCase {
         XCTAssertTrue(exists("old"), "old root kept because a skipped file remains")
     }
 
+    func testMoveLeavesNonPodcastContentAlone() throws {
+        try touch("old/Show A/one.mp3")
+        try touch("old/notes.txt")                    // loose file: not part of the library
+        try touch("old/Photos/holiday.jpg")           // folder without media: not a podcast folder
+        try touch("old/.git/config")                  // hidden: never touched
+        try touch("old/Show A/cover.jpg")             // rides along inside a podcast folder
+
+        let result = try LibraryFolder.move(from: root.appendingPathComponent("old"), to: root.appendingPathComponent("new"))
+
+        XCTAssertEqual(result.moved, 1, "only the podcast folder")
+        XCTAssertTrue(exists("new/Show A/one.mp3"))
+        XCTAssertTrue(exists("new/Show A/cover.jpg"))
+        XCTAssertTrue(exists("old/notes.txt"))
+        XCTAssertTrue(exists("old/Photos/holiday.jpg"))
+        XCTAssertTrue(exists("old/.git/config"))
+        XCTAssertFalse(exists("new/notes.txt"))
+        XCTAssertFalse(exists("new/Photos"))
+        XCTAssertTrue(exists("old"), "old root kept because the user's other files are still there")
+    }
+
+    func testMergeMovesOnlyMediaAndKeepsHiddenFiles() throws {
+        try touch("old/Show A/one.mp3")
+        try touch("old/Show A/notes.txt")
+        try touch("old/Show A/.hidden")
+        try touch("new/Show A/existing.mp3")          // target exists → merge path
+
+        _ = try LibraryFolder.move(from: root.appendingPathComponent("old"), to: root.appendingPathComponent("new"))
+
+        XCTAssertTrue(exists("new/Show A/one.mp3"))
+        XCTAssertTrue(exists("old/Show A/notes.txt"), "non-media stays put during a merge")
+        XCTAssertTrue(exists("old/Show A/.hidden"), "hidden files are never deleted")
+        XCTAssertTrue(exists("old/Show A"))
+    }
+
+    func testMoveRemovesFolderThatOnlyHoldsFinderBookkeeping() throws {
+        try touch("old/Show A/one.mp3")
+        try touch("old/Show A/.DS_Store")
+        try touch("old/.DS_Store")
+        _ = try LibraryFolder.move(from: root.appendingPathComponent("old"), to: root.appendingPathComponent("new"))
+        XCTAssertFalse(exists("old"), ".DS_Store alone doesn't keep a folder alive")
+        XCTAssertTrue(exists("new/Show A/one.mp3"))
+    }
+
     func testMoveRemovesEmptyOldRoot() throws {
         try touch("old/Show A/one.mp3")
         _ = try LibraryFolder.move(from: root.appendingPathComponent("old"), to: root.appendingPathComponent("new"))

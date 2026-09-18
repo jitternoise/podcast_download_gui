@@ -49,10 +49,17 @@ final class AppModel {
         downloads.maxConcurrent = settings.maxConcurrentDownloads
     }
 
+    /// True while quitting would interrupt something the user cares about.
+    var hasWorkInProgress: Bool {
+        !downloads.activeItems.isEmpty || player.isPlaying
+    }
+
     // MARK: Local files
 
     /// The downloaded file for an episode, if it exists in the master folder.
-    /// Checks the recorded location first, then the location it would be saved to now.
+    /// Checks the recorded location first, then the location it would be saved
+    /// to now — unless that file is recorded as belonging to another episode
+    /// that happens to produce the same name.
     func localFile(for episode: Episode, in podcast: Podcast) -> URL? {
         let fm = FileManager.default
         if let rel = library.downloadedRelativePath(for: episode) {
@@ -60,7 +67,21 @@ final class AppModel {
             if fm.fileExists(atPath: url.path) { return url }
         }
         let expected = settings.file(for: episode, in: podcast)
-        return fm.fileExists(atPath: expected.path) ? expected : nil
+        guard fm.fileExists(atPath: expected.path) else { return nil }
+        if let owner = library.episodeID(downloadedTo: relativePath(of: expected)), owner != episode.id { return nil }
+        return expected
+    }
+
+    /// Where a download of `episode` should be written. A re-download replaces
+    /// the episode's own file; otherwise the name is made unique so two episodes
+    /// that sanitize to the same file name never overwrite each other.
+    private func destination(for episode: Episode, in podcast: Podcast) -> URL {
+        if let own = localFile(for: episode, in: podcast) { return own }
+        let candidate = settings.file(for: episode, in: podcast)
+        return FileNaming.uniqueURL(candidate) { url in
+            FileManager.default.fileExists(atPath: url.path)
+                || downloads.activeItems.contains { $0.id != episode.id && $0.destination.standardizedFileURL == url.standardizedFileURL }
+        }
     }
 
     private func relativePath(of url: URL) -> String {
@@ -126,7 +147,14 @@ final class AppModel {
     // MARK: Downloads
 
     func download(_ episode: Episode, from podcast: Podcast) {
-        let destination = settings.file(for: episode, in: podcast)
+        let destination = destination(for: episode, in: podcast)
+        // Belt and braces: names are sanitized, but nothing may ever be written
+        // outside the master folder.
+        let root = settings.masterDirectory.standardizedFileURL.path + "/"
+        guard destination.standardizedFileURL.path.hasPrefix(root) else {
+            NSLog("Refusing to download outside the master folder: \(destination.path)")
+            return
+        }
         downloads.enqueue(episode, from: podcast, to: destination)
     }
 

@@ -83,13 +83,21 @@ final class DownloadManager {
         guard slots > 0 else { return }
 
         for idx in items.indices where items[idx].state == .queued && slots > 0 {
-            start(items[idx])
-            items[idx].state = .downloading
-            slots -= 1
+            // start() marks the item .failed itself when it can't begin; only a
+            // real task occupies a slot.
+            if start(items[idx]) {
+                items[idx].state = .downloading
+                slots -= 1
+            }
         }
     }
 
-    private func start(_ item: DownloadItem) {
+    /// Kicks off the transfer. Returns false (and marks the item failed) if it can't.
+    private func start(_ item: DownloadItem) -> Bool {
+        guard item.episode.enclosureURL.isWebURL else {
+            setState(item.id, .failed("Unsupported URL: \(item.episode.enclosureURL.absoluteString)"))
+            return false
+        }
         do {
             try FileManager.default.createDirectory(
                 at: item.destination.deletingLastPathComponent(),
@@ -97,12 +105,13 @@ final class DownloadManager {
             )
         } catch {
             setState(item.id, .failed("Could not create folder: \(error.localizedDescription)"))
-            return
+            return false
         }
         var request = URLRequest(url: item.episode.enclosureURL)
         request.setValue("PodcastDownloader/1.0 (macOS)", forHTTPHeaderField: "User-Agent")
         let task = transport.download(request, id: item.id, destination: item.destination)
         tasks[item.id] = task
+        return true
     }
 
     // MARK: Callbacks

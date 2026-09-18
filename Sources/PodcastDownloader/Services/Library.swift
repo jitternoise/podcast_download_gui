@@ -27,7 +27,10 @@ final class Library {
 
     private(set) var podcasts: [Podcast] = []
     private(set) var episodes: [String: [Episode]] = [:]     // podcast id -> episodes, newest first
-    private(set) var downloaded: [String: String] = [:]      // episode id -> path relative to master folder
+    private(set) var downloaded: [String: String] = [:] {   // episode id -> path relative to master folder
+        didSet { downloadedOwners = Dictionary(downloaded.map { ($1, $0) }, uniquingKeysWith: { a, _ in a }) }
+    }
+    private var downloadedOwners: [String: String] = [:]     // relative path -> episode id
     private(set) var lastRefreshed: [String: Date] = [:]     // podcast id -> date
     private(set) var playbackPositions: [String: Double] = [:] // episode id -> seconds listened to
     private(set) var lastFullRefresh: Date?                    // when every subscription was last refreshed together
@@ -83,6 +86,11 @@ final class Library {
     /// Path relative to the master folder where this episode was saved, if known.
     func downloadedRelativePath(for episode: Episode) -> String? {
         downloaded[episode.id]
+    }
+
+    /// The episode recorded as having been saved to this master-relative path, if any.
+    func episodeID(downloadedTo relativePath: String) -> String? {
+        downloadedOwners[relativePath]
     }
 
     // MARK: Mutations

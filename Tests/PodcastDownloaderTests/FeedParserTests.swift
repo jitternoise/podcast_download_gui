@@ -64,6 +64,41 @@ final class FeedParserTests: XCTestCase {
         XCTAssertLessThanOrEqual(FileNaming.sanitize(String(repeating: "a", count: 500), fallback: "x").count, 120)
     }
 
+    func testSanitizeCleansTheFallbackToo() {
+        // The fallback is the feed's <guid>; it must not be able to smuggle a path.
+        XCTAssertEqual(FileNaming.sanitize("???", fallback: "../../../Users/me/Documents/x"), "Users me Documents x")
+        XCTAssertEqual(FileNaming.sanitize("", fallback: ".."), "Untitled")
+        XCTAssertEqual(FileNaming.sanitize("", fallback: ""), "Untitled")
+
+        let hostile = Episode(id: "../../.zshrc", title: "***", summary: "", publishedAt: nil,
+                              enclosureURL: URL(string: "https://example.com/a.sh")!,
+                              enclosureLength: nil, mimeType: nil, duration: nil)
+        XCTAssertFalse(hostile.fileName.contains("/"))
+        XCTAssertFalse(hostile.fileName.hasPrefix("."))
+        XCTAssertEqual(hostile.fileName, "zshrc.sh")
+    }
+
+    func testUniqueURLAppendsCounterBeforeExtension() {
+        let base = URL(fileURLWithPath: "/tmp/Show/2026-01-01 - Ep.mp3")
+        let taken: Set<String> = ["/tmp/Show/2026-01-01 - Ep.mp3", "/tmp/Show/2026-01-01 - Ep (2).mp3"]
+        XCTAssertEqual(FileNaming.uniqueURL(base) { taken.contains($0.path) }.path, "/tmp/Show/2026-01-01 - Ep (3).mp3")
+        XCTAssertEqual(FileNaming.uniqueURL(base) { _ in false }, base)
+    }
+
+    func testOnlyWebEnclosuresAreAccepted() throws {
+        let feed = """
+        <rss version="2.0"><channel><title>T</title>
+          <item><title>Local</title><guid>a</guid><enclosure url="file:///etc/passwd" type="audio/mpeg"/></item>
+          <item><title>Data</title><guid>b</guid><enclosure url="data:audio/mpeg;base64,AAAA" type="audio/mpeg"/></item>
+          <item><title>Padded</title><guid>c</guid><enclosure url="  https://example.com/c.mp3 " type="audio/mpeg"/></item>
+          <item><title>Plain http</title><guid>d</guid><enclosure url="http://example.com/d.mp3" type="audio/mpeg"/></item>
+        </channel></rss>
+        """
+        let parsed = try FeedParser().parse(Data(feed.utf8))
+        XCTAssertEqual(parsed.episodes.map(\.id), ["c", "d"])
+        XCTAssertEqual(parsed.episodes[0].enclosureURL.absoluteString, "https://example.com/c.mp3")
+    }
+
     func testDateFormats() {
         XCTAssertNotNil(RSSDate.parse("Mon, 08 Sep 2026 10:00:00 +0000"))
         XCTAssertNotNil(RSSDate.parse("Mon, 08 Sep 2026 10:00:00 PDT"))

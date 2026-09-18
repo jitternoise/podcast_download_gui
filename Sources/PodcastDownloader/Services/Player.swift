@@ -36,6 +36,8 @@ final class Player {
     private var timeObserver: Any?
     private var endObserver: NSObjectProtocol?
     private var lastPersistedAt = Date.distantPast
+    /// Set when the current item played to the end; cleared by any seek or new load.
+    private var didFinish = false
 
     init() {
         player.defaultRate = rate
@@ -61,6 +63,7 @@ final class Player {
         self.podcast = podcast
         duration = 0
         currentTime = startAt
+        didFinish = false
 
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
         endObserver = NotificationCenter.default.addObserver(
@@ -89,6 +92,8 @@ final class Player {
 
     func resume() {
         guard episode != nil else { return }
+        // AVPlayer sits at the end after finishing; play() alone does nothing.
+        if didFinish { seek(to: 0) }
         player.play()          // honours defaultRate
         isPlaying = true
         updateNowPlaying()
@@ -107,6 +112,7 @@ final class Player {
     func seek(to seconds: Double) {
         let clamped = max(0, min(seconds, duration > 0 ? duration : seconds))
         currentTime = clamped
+        didFinish = false
         player.seek(to: CMTime(seconds: clamped, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
         updateNowPlaying()
     }
@@ -118,6 +124,7 @@ final class Player {
         podcast = nil
         currentTime = 0
         duration = 0
+        didFinish = false
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         MPNowPlayingInfoCenter.default().playbackState = .stopped
     }
@@ -135,16 +142,23 @@ final class Player {
     private func didReachEnd() {
         isPlaying = false
         currentTime = duration
+        didFinish = true
         if let episode {
             onFinished?(episode)
         }
         updateNowPlaying()
     }
 
+    /// Writes the resume point now. Called on quit; otherwise every ~30 s and on pause.
+    func flushPosition() {
+        persistPosition(force: true)
+    }
+
     private func persistPosition(force: Bool) {
         guard let episode else { return }
         lastPersistedAt = Date()
-        onPositionUpdate?(episode, currentTime)
+        // A finished episode starts over next time, whatever currentTime says.
+        onPositionUpdate?(episode, didFinish ? 0 : currentTime)
     }
 
     // MARK: Now Playing / media keys

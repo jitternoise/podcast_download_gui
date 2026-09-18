@@ -24,6 +24,13 @@ struct LocalFile: Identifiable, Hashable {
 enum LibraryFolder {
     private static let audioExtensions: Set<String> = ["mp3", "m4a", "aac", "ogg", "opus", "wav", "flac", "mp4", "m4b"]
 
+    static func isMediaFile(_ url: URL) -> Bool {
+        audioExtensions.contains(url.pathExtension.lowercased())
+    }
+
+    /// Finder bookkeeping that shouldn't stop a folder from counting as empty.
+    private static let ignorableEntries: Set<String> = [".DS_Store", ".localized"]
+
     /// Lists every podcast sub-folder and the media files inside it.
     static func scan(_ master: URL) -> [PodcastFolder] {
         let fm = FileManager.default
@@ -39,7 +46,7 @@ enum LibraryFolder {
             )) ?? []
 
             let localFiles: [LocalFile] = files.compactMap { file in
-                guard audioExtensions.contains(file.pathExtension.lowercased()),
+                guard isMediaFile(file),
                       let values = try? file.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey, .isRegularFileKey]),
                       values.isRegularFile == true else { return nil }
                 return LocalFile(
@@ -61,9 +68,14 @@ enum LibraryFolder {
         var skipped = 0      // already existed at destination; source left in place
     }
 
-    /// Moves every podcast sub-folder from `old` into `new`, merging folders that
+    /// Moves the podcast sub-folders from `old` into `new`, merging folders that
     /// already exist there. Files that already exist at the destination are
     /// skipped rather than overwritten. Works across volumes (copy + delete).
+    ///
+    /// Only sub-folders that contain media files are touched, so pointing the
+    /// app at a folder that holds other things (or at ~/Downloads itself) never
+    /// relocates them. Anything else in `old` is left exactly where it is, and
+    /// `old` is only removed once nothing but Finder bookkeeping remains.
     static func move(from old: URL, to new: URL) throws -> MoveResult {
         let fm = FileManager.default
         var result = MoveResult()
@@ -77,38 +89,50 @@ enum LibraryFolder {
         try fm.createDirectory(at: new, withIntermediateDirectories: true)
         guard fm.fileExists(atPath: oldPath) else { return result }
 
-        let entries = try fm.contentsOfDirectory(at: old, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
-        for source in entries {
+        for source in try podcastFolders(in: old) {
             let target = new.appendingPathComponent(source.lastPathComponent)
-            let isDir = (try? source.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
 
             if !fm.fileExists(atPath: target.path) {
                 try fm.moveItem(at: source, to: target)
                 result.moved += 1
-            } else if isDir {
-                // Merge file-by-file into the existing folder.
-                let files = try fm.contentsOfDirectory(at: source, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
-                for file in files {
-                    let fileTarget = target.appendingPathComponent(file.lastPathComponent)
-                    if fm.fileExists(atPath: fileTarget.path) {
-                        result.skipped += 1
-                    } else {
-                        try fm.moveItem(at: file, to: fileTarget)
-                        result.moved += 1
-                    }
-                }
-                removeIfEmpty(source)
-            } else {
-                result.skipped += 1
+                continue
             }
+            // Merge media file-by-file into the existing folder.
+            let files = try fm.contentsOfDirectory(at: source, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
+            for file in files where isMediaFile(file) {
+                let fileTarget = target.appendingPathComponent(file.lastPathComponent)
+                if fm.fileExists(atPath: fileTarget.path) {
+                    result.skipped += 1
+                } else {
+                    try fm.moveItem(at: file, to: fileTarget)
+                    result.moved += 1
+                }
+            }
+            removeIfEmpty(source)
         }
         removeIfEmpty(old)
         return result
     }
 
+    /// Immediate sub-folders of `master` that hold at least one media file.
+    private static func podcastFolders(in master: URL) throws -> [URL] {
+        let fm = FileManager.default
+        let entries = try fm.contentsOfDirectory(at: master, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
+        return entries.filter { dir in
+            guard (try? dir.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true,
+                  let files = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
+            else { return false }
+            return files.contains(where: isMediaFile)
+        }
+    }
+
+    /// Deletes `dir` only if it holds nothing but Finder bookkeeping. Hidden
+    /// files the user put there (dotfiles, .git, …) keep the folder alive.
     private static func removeIfEmpty(_ dir: URL) {
         let fm = FileManager.default
-        let remaining = (try? fm.contentsOfDirectory(atPath: dir.path))?.filter { !$0.hasPrefix(".") } ?? []
-        if remaining.isEmpty { try? fm.removeItem(at: dir) }
+        guard let remaining = try? fm.contentsOfDirectory(atPath: dir.path) else { return }
+        if remaining.allSatisfy({ ignorableEntries.contains($0) }) {
+            try? fm.removeItem(at: dir)
+        }
     }
 }

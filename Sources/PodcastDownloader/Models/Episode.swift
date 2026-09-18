@@ -38,17 +38,43 @@ struct Episode: Identifiable, Codable, Hashable {
 }
 
 enum FileNaming {
+    private static let illegal = CharacterSet(charactersIn: "/\\:*?\"<>|").union(.controlCharacters).union(.newlines)
+
     /// Strip characters that are illegal or awkward in macOS file names and
     /// clamp the length so very long titles don't hit filesystem limits.
+    ///
+    /// The fallback is cleaned the same way: it is usually the feed's `<guid>`,
+    /// which is attacker-controlled and must never be able to carry a path.
     static func sanitize(_ raw: String, fallback: String) -> String {
-        let illegal = CharacterSet(charactersIn: "/\\:*?\"<>|").union(.controlCharacters).union(.newlines)
-        var cleaned = raw.components(separatedBy: illegal).joined(separator: " ")
-        cleaned = cleaned.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-        cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Finder treats a leading dot as hidden.
-        while cleaned.hasPrefix(".") { cleaned.removeFirst() }
-        if cleaned.isEmpty { cleaned = fallback }
+        var cleaned = clean(raw)
+        if cleaned.isEmpty { cleaned = clean(fallback) }
+        if cleaned.isEmpty { cleaned = "Untitled" }
         if cleaned.count > 120 { cleaned = String(cleaned.prefix(120)).trimmingCharacters(in: .whitespaces) }
         return cleaned
+    }
+
+    private static func clean(_ raw: String) -> String {
+        var cleaned = raw.components(separatedBy: illegal)
+            .filter { $0 != "." && $0 != ".." }      // path-only pieces mean nothing as text
+            .joined(separator: " ")
+        cleaned = cleaned.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        // Finder treats a leading dot as hidden.
+        while let first = cleaned.first, first == "." || first.isWhitespace { cleaned.removeFirst() }
+        return cleaned.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// `candidate` with " (2)", " (3)", … inserted before the extension until
+    /// `isTaken` says no. Used so two episodes that sanitize to the same name
+    /// never overwrite each other.
+    static func uniqueURL(_ candidate: URL, isTaken: (URL) -> Bool) -> URL {
+        guard isTaken(candidate) else { return candidate }
+        let ext = candidate.pathExtension
+        let stem = candidate.deletingPathExtension().lastPathComponent
+        let dir = candidate.deletingLastPathComponent()
+        for n in 2... {
+            let url = dir.appendingPathComponent("\(stem) (\(n))").appendingPathExtension(ext)
+            if !isTaken(url) { return url }
+        }
+        fatalError("unreachable")
     }
 }

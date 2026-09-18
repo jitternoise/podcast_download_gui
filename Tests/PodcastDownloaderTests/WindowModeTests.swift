@@ -78,6 +78,61 @@ final class WindowModeTests: XCTestCase {
         XCTAssertTrue(main.isVisible)
     }
 
+    func testClosingMiniWindowRestoresMainBeforeTheCloseCompletes() {
+        // If the main window only came back on a later run-loop turn, the app would
+        // have zero visible windows for a moment and terminate (see AppDelegate).
+        let main = makeMain()
+        let mode = makeMode(for: main)
+        mode.collapse(); settle()
+        XCTAssertFalse(main.isVisible)
+
+        mode.miniWindow?.close()
+
+        XCTAssertTrue(main.isVisible, "main window is back synchronously")
+        XCTAssertFalse(mode.isMini)
+        XCTAssertNil(mode.miniWindow)
+        settle()
+        XCTAssertTrue(main.isVisible)
+        XCTAssertEqual(main.alphaValue, 1)
+    }
+
+    func testRapidCollapseThenExpandLeavesMainVisible() {
+        let main = makeMain()
+        let mode = makeMode(for: main)
+
+        mode.collapse()
+        let mini = mode.miniWindow
+        mode.expand()                 // before the collapse fade has finished
+        settle()
+
+        XCTAssertFalse(mode.isMini)
+        XCTAssertTrue(main.isVisible, "stale collapse completion must not hide the main window")
+        XCTAssertEqual(main.alphaValue, 1)
+        XCTAssertNil(mode.miniWindow)
+        XCTAssertEqual(mini?.isVisible, false)
+    }
+
+    func testRapidCollapseExpandCollapseEndsInMiniWithOneMiniWindow() {
+        let main = makeMain()
+        let mode = makeMode(for: main)
+
+        mode.collapse()
+        let first = mode.miniWindow
+        mode.expand()
+        mode.collapse()
+        let second = mode.miniWindow
+        settle()
+
+        XCTAssertTrue(mode.isMini)
+        XCTAssertFalse(main.isVisible)
+        XCTAssertEqual(main.alphaValue, 1, "hidden main is reset to opaque for the next expand")
+        XCTAssertNotNil(second)
+        XCTAssertTrue(second !== first)
+        XCTAssertEqual(second?.isVisible, true)
+        XCTAssertEqual(first?.isVisible, false, "the abandoned mini window was closed")
+        mode.expand(); settle()
+    }
+
     func testKeepOnTopFloatsOnlyTheMiniWindow() {
         let main = makeMain()
         let mode = makeMode(for: main)
