@@ -40,7 +40,8 @@ struct Episode: Identifiable, Codable, Hashable {
         }
     }
 
-    static let mediaExtensions: Set<String> = ["mp3", "m4a", "aac", "ogg", "opus", "wav", "flac", "mp4", "m4b"]
+    /// Extensions treated as podcast media, by URL, by MIME type and by content sniffing alike.
+    static let mediaExtensions: Set<String> = ["mp3", "mp2", "mp1", "m4a", "aac", "ogg", "opus", "wav", "flac", "mp4", "m4b"]
 
     /// `2024-03-09 - Episode Title.mp3`. The date is the UTC publish date so
     /// the same episode gets the same name on every Mac.

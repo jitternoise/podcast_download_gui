@@ -25,7 +25,7 @@ struct LocalFile: Identifiable, Hashable {
 /// Disk-level operations on the master folder: scanning and relocating.
 /// Everything here is synchronous and safe to run off the main actor.
 enum LibraryFolder {
-    private static let audioExtensions: Set<String> = ["mp3", "m4a", "aac", "ogg", "opus", "wav", "flac", "mp4", "m4b"]
+    private static let audioExtensions: Set<String> = Episode.mediaExtensions
 
     static func isMediaFile(_ url: URL) -> Bool {
         audioExtensions.contains(url.pathExtension.lowercased())

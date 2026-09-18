@@ -233,8 +233,10 @@ final class DownloadTransport: NSObject, URLSessionDownloadDelegate, @unchecked 
         /// Present when URLSession can continue the transfer later.
         let resumeData: Data?
 
-        /// Errors that go away by themselves: lost connection, timeout, offline.
+        /// Errors that go away by themselves: lost connection, timeout, offline,
+        /// or a transfer that ended before the announced length.
         var isTransient: Bool {
+            if error is TruncatedDownload { return true }
             let ns = error as NSError
             guard ns.domain == NSURLErrorDomain else { return false }
             return [NSURLErrorNetworkConnectionLost, NSURLErrorTimedOut, NSURLErrorNotConnectedToInternet,
@@ -310,22 +312,68 @@ final class DownloadTransport: NSObject, URLSessionDownloadDelegate, @unchecked 
             onComplete(p.id, .failure(Failure(error: FeedError(message: "Server returned HTTP \(http.statusCode)."), resumeData: nil)))
             return
         }
-        if let reason = Self.rejectionReason(for: location, response: downloadTask.response, expected: p.expected) {
-            onComplete(p.id, .failure(Failure(error: FeedError(message: reason), resumeData: nil)))
+        let verdict: Verdict
+        do {
+            verdict = try Self.check(file: location, response: downloadTask.response, expected: p.expected)
+        } catch {
+            onComplete(p.id, .failure(Failure(error: error, resumeData: nil)))
             return
         }
 
         let fm = FileManager.default
         do {
-            try fm.createDirectory(at: p.destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-            if fm.fileExists(atPath: p.destination.path) {
-                try fm.removeItem(at: p.destination)
+            // Name the file for what it actually contains.
+            var final = p.destination
+            if let ext = verdict.sniffedExtension, ext != final.pathExtension.lowercased() {
+                final = final.deletingPathExtension().appendingPathExtension(ext)
             }
-            try fm.moveItem(at: location, to: p.destination)
-            onComplete(p.id, .success(p.destination))
+            try fm.createDirectory(at: final.deletingLastPathComponent(), withIntermediateDirectories: true)
+            // The temp file is on the boot volume; moving it to an external
+            // drive is a copy, and a crash mid-copy must not leave a
+            // truncated file under the real name. Copy as ".part", then rename
+            // (same volume: atomic).
+            let partial = final.appendingPathExtension("part")
+            try? fm.removeItem(at: partial)
+            try fm.moveItem(at: location, to: partial)
+            for stale in [p.destination, final] where fm.fileExists(atPath: stale.path) {
+                try fm.removeItem(at: stale)        // "Download Again": replace the old copy
+            }
+            try fm.moveItem(at: partial, to: final)
+            onComplete(p.id, .success(final))
         } catch {
             onComplete(p.id, .failure(Failure(error: error, resumeData: nil)))
         }
+    }
+
+    /// The body ended before the server's announced Content-Length.
+    struct TruncatedDownload: LocalizedError {
+        let message: String
+        var errorDescription: String? { message }
+    }
+
+    struct Verdict {
+        /// The format the bytes turned out to be, when recognised.
+        var sniffedExtension: String?
+    }
+
+    /// Validates a completed transfer: the server's promised length must
+    /// match, and the body must be media, not a web page. Throws a
+    /// user-readable reason otherwise.
+    static func check(file: URL, response: URLResponse?, expected: Expectation) throws -> Verdict {
+        if let reason = rejectionReason(for: file, response: response, expected: expected) {
+            throw FeedError(message: reason)
+        }
+        // A connection that drops before the announced length can surface as
+        // a clean finish; a short file must never be recorded as the episode.
+        let size = (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
+        let promised = response?.expectedContentLength ?? -1
+        let encoded = ((response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Encoding") ?? "identity").lowercased()
+        if promised > 0, encoded == "identity", size != promised {
+            let got = ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
+            let want = ByteCountFormatter.string(fromByteCount: promised, countStyle: .file)
+            throw TruncatedDownload(message: "Download was cut short (\(got) of \(want)). Retry to fetch it again.")
+        }
+        return Verdict(sniffedExtension: MediaSniffer.fileExtension(of: file))
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {

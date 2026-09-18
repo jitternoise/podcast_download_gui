@@ -26,7 +26,12 @@ downloading episodes to a folder of your choosing.
 - **Download** individual episodes or an entire back catalog, with a concurrent
   download queue and per-episode progress. Downloads keep the Mac from idle-
   sleeping, survive a lost Wi-Fi connection or a lid-close by resuming where
-  they stopped, and quitting warns you if any are still running.
+  they stopped, and quitting warns you if any are still running. Files are
+  stored exactly as the host served them — never transcoded — and verified:
+  a transfer shorter than the server announced is retried rather than kept,
+  a web page served in place of audio is rejected, files are staged as
+  `.part` until complete, and each file is named for the format its bytes
+  actually are (a `.mp3` URL that serves AAC becomes `.m4a`).
 - **Built-in player** — double-click an episode to play it in the player bar at
   the bottom of the window: play/pause, skip back/forward (5–60 s, your
   choice), scrubber, chapters when the file has them, playback speed
