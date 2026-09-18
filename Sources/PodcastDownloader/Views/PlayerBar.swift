@@ -46,9 +46,9 @@ struct MiniPlayerView: View {
                         Text(model.player.episode?.title ?? "Nothing playing")
                             .font(.headline)
                             .lineLimit(1)
-                        Text(model.player.podcast?.title ?? "")
+                        Text(model.player.error ?? model.player.podcast?.title ?? "")
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(model.player.error == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(.red))
                             .lineLimit(1)
                     }
                     Spacer(minLength: 8)
@@ -97,10 +97,11 @@ struct NowPlayingLabel: View {
                 Text(model.player.episode?.title ?? "Nothing playing")
                     .font(.headline)
                     .lineLimit(1)
-                Text(model.player.podcast?.title ?? "Double-click an episode to play it")
+                Text(model.player.error ?? model.player.podcast?.title ?? "Double-click an episode to play it")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(model.player.error == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(.red))
                     .lineLimit(1)
+                    .help(model.player.error ?? "")
             }
         }
     }

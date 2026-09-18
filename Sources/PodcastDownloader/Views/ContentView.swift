@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 enum SidebarItem: Hashable {
@@ -20,6 +21,9 @@ struct ContentView: View {
                 sidebar
             } detail: {
                 detail
+            }
+            if let problem = model.folderProblem {
+                FolderProblemBanner(problem: problem)
             }
             PlayerBar()
         }
@@ -100,6 +104,59 @@ struct ContentView: View {
             } else {
                 ContentUnavailableView("Podcast not found", systemImage: "questionmark.circle")
             }
+        }
+    }
+}
+
+/// Shown above the player bar while the master folder can't be used.
+struct FolderProblemBanner: View {
+    @Environment(AppModel.self) private var model
+    let problem: AppModel.FolderProblem
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.yellow)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.headline)
+                Text(model.settings.masterDirectory.path)
+                    .font(.caption).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.middle)
+            }
+            Spacer()
+            switch problem {
+            case .missing:
+                Button("Locate…") { locate() }
+                Button("Use Default Folder") { model.adoptMasterDirectory(AppSettings.defaultMasterDirectory) }
+            case .noPermission:
+                Button("Open Privacy Settings") { model.openPrivacySettings() }
+                Button("Choose Another Folder…") { locate() }
+            }
+            Button("Check Again") { model.rescanDisk() }
+        }
+        .controlSize(.small)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(.yellow.opacity(0.12))
+        .overlay(alignment: .top) { Divider() }
+    }
+
+    private var title: String {
+        switch problem {
+        case .missing: "The podcast folder can't be found. Downloads are paused until it's back or you pick another one."
+        case .noPermission: "macOS is blocking access to the podcast folder. Downloads will fail until it's allowed."
+        }
+    }
+
+    private func locate() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Use This Folder"
+        panel.message = "Choose the folder that holds your podcast sub-folders."
+        if panel.runModal() == .OK, let url = panel.url {
+            model.adoptMasterDirectory(url)
         }
     }
 }

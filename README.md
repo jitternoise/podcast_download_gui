@@ -9,13 +9,18 @@ downloading episodes to a folder of your choosing.
   RSS feed URL directly.
 - **Subscribe** to shows; the app keeps track of their episodes and can
   automatically download new ones each time it refreshes. Feeds are refreshed
-  automatically at launch, but no more often than the interval you choose in
-  Settings (default: once an hour). Refresh All (⌘R) always checks immediately.
+  automatically — at launch, after the Mac wakes, when the app comes to the
+  front, and periodically while it stays open — but no more often than the
+  interval you choose in Settings (default: once an hour). Refresh All (⌘R)
+  always checks immediately. Pasting a show's web page instead of its feed
+  works too, as long as the page links to its RSS feed.
 - **Latest Episodes** — one list of the 100 newest episodes across every
   subscription, newest first, so you can see what's new without clicking
   through each show.
 - **Download** individual episodes or an entire back catalog, with a concurrent
-  download queue and per-episode progress.
+  download queue and per-episode progress. Downloads keep the Mac from idle-
+  sleeping, survive a lost Wi-Fi connection or a lid-close by resuming where
+  they stopped, and quitting warns you if any are still running.
 - **Built-in player** — double-click an episode to play it in the player bar at
   the bottom of the window: play/pause, 10-second skip back/forward, scrubber,
   playback speed (0.75×–2×), and it remembers where you left off in each episode.
@@ -30,11 +35,14 @@ downloading episodes to a folder of your choosing.
   selection, scroll position and all.
 - **One folder, always** — you pick a single master folder and every podcast
   gets its own sub-folder named after the show. Change the folder in Settings
-  and the app moves your whole library there. The Downloads tab shows exactly
-  what's in that folder.
+  and the app moves your podcast folders there (anything else in the old
+  folder is left alone). The app follows the folder if you rename or move it
+  in Finder, and tells you if it can't be found — on an unplugged drive, say —
+  rather than quietly starting a second library. The Downloads tab shows
+  exactly what's in that folder.
 
   ```
-  ~/Downloads/Podcasts/
+  ~/Music/Podcasts/
   ├── Some Podcast/
   │   ├── 2026-09-01 - Episode 42.mp3
   │   └── 2026-09-08 - Episode 43.mp3
@@ -88,8 +96,8 @@ Sources/PodcastDownloader/
 
 | What | Where |
 |------|-------|
-| Downloaded audio | Master folder (default `~/Downloads/Podcasts`, change in **Settings ⌘,**) |
-| Subscriptions & episode cache | `~/Library/Application Support/PodcastDownloader/library.json` (download locations stored relative to the master folder) |
+| Downloaded audio | Master folder (default `~/Music/Podcasts`; an existing `~/Downloads/Podcasts` from earlier versions is kept; change in **Settings ⌘,**) |
+| Subscriptions & episode cache | `~/Library/Application Support/PodcastDownloader/library.json` (download locations stored relative to the master folder; the previous session's copy is kept as `library.json.bak`, and a file that can't be read is set aside as `library.json.corrupt-…` rather than overwritten) |
 | Preferences | `UserDefaults` |
 
 ## Keyboard shortcuts

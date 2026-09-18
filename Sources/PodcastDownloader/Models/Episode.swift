@@ -9,6 +9,14 @@ struct Episode: Identifiable, Codable, Hashable {
     var enclosureLength: Int64?
     var mimeType: String?
     var duration: String?
+    /// The feed this episode came from (`Podcast.id`). Set by the library when
+    /// episodes are cached, so `key` is unique across podcasts even when two
+    /// feeds reuse the same guid.
+    var podcastID: String?
+
+    /// Key for per-episode state (downloads, positions, the queue, the player).
+    /// `id` alone is only unique within one feed.
+    var key: String { podcastID.map { $0 + "|" + id } ?? id }
 
     /// File extension inferred from the enclosure URL, falling back to the
     /// MIME type and finally to mp3.

@@ -31,6 +31,38 @@ enum LibraryFolder {
     /// Finder bookkeeping that shouldn't stop a folder from counting as empty.
     private static let ignorableEntries: Set<String> = [".DS_Store", ".localized"]
 
+    /// Whether the master folder can be used. A folder that doesn't exist yet
+    /// is fine when its parent is reachable (the first download creates it).
+    static func check(_ master: URL) -> AppModel.FolderProblem? {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        if fm.fileExists(atPath: master.path, isDirectory: &isDir) {
+            guard isDir.boolValue else { return .missing }
+            do {
+                _ = try fm.contentsOfDirectory(atPath: master.path)
+                return nil
+            } catch {
+                return isPermissionError(error) ? .noPermission : .missing
+            }
+        }
+        // Not there. Distinguish "not created yet" from "the drive is unplugged"
+        // or "the parent folder is off limits".
+        let parent = master.deletingLastPathComponent()
+        guard fm.fileExists(atPath: parent.path, isDirectory: &isDir), isDir.boolValue else { return .missing }
+        do {
+            _ = try fm.contentsOfDirectory(atPath: parent.path)
+            return nil
+        } catch {
+            return isPermissionError(error) ? .noPermission : .missing
+        }
+    }
+
+    private static func isPermissionError(_ error: Error) -> Bool {
+        let ns = error as NSError
+        return ns.domain == NSCocoaErrorDomain
+            && (ns.code == NSFileReadNoPermissionError || ns.code == NSFileWriteNoPermissionError)
+    }
+
     /// Lists every podcast sub-folder and the media files inside it.
     static func scan(_ master: URL) -> [PodcastFolder] {
         let fm = FileManager.default
@@ -66,6 +98,11 @@ enum LibraryFolder {
     struct MoveResult {
         var moved = 0
         var skipped = 0      // already existed at destination; source left in place
+        var replaced = 0     // destination had a partial copy from an interrupted move
+        var failed: [String] = []   // "<name>: <reason>", one per item that couldn't be moved
+        var total = 0        // podcast folders found in the old location
+
+        var isComplete: Bool { failed.isEmpty }
     }
 
     /// Moves the podcast sub-folders from `old` into `new`, merging folders that
@@ -89,29 +126,52 @@ enum LibraryFolder {
         try fm.createDirectory(at: new, withIntermediateDirectories: true)
         guard fm.fileExists(atPath: oldPath) else { return result }
 
-        for source in try podcastFolders(in: old) {
+        // One failing item (disk full, permissions) must not abandon the rest:
+        // whatever moved stays moved, and the caller reports what didn't.
+        let folders = try podcastFolders(in: old)
+        result.total = folders.count
+        for source in folders {
             let target = new.appendingPathComponent(source.lastPathComponent)
-
-            if !fm.fileExists(atPath: target.path) {
-                try fm.moveItem(at: source, to: target)
-                result.moved += 1
-                continue
-            }
-            // Merge media file-by-file into the existing folder.
-            let files = try fm.contentsOfDirectory(at: source, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
-            for file in files where isMediaFile(file) {
-                let fileTarget = target.appendingPathComponent(file.lastPathComponent)
-                if fm.fileExists(atPath: fileTarget.path) {
-                    result.skipped += 1
-                } else {
-                    try fm.moveItem(at: file, to: fileTarget)
+            do {
+                if !fm.fileExists(atPath: target.path) {
+                    try fm.moveItem(at: source, to: target)
                     result.moved += 1
+                    continue
                 }
+                try merge(source, into: target, result: &result)
+            } catch {
+                result.failed.append("\(source.lastPathComponent): \(error.localizedDescription)")
             }
-            removeIfEmpty(source)
         }
-        removeIfEmpty(old)
+        if result.isComplete { removeIfEmpty(old) }
         return result
+    }
+
+    /// Moves media files from `source` into the existing folder `target`.
+    private static func merge(_ source: URL, into target: URL, result: inout MoveResult) throws {
+        let fm = FileManager.default
+        let files = try fm.contentsOfDirectory(at: source, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
+        for file in files where isMediaFile(file) {
+            let fileTarget = target.appendingPathComponent(file.lastPathComponent)
+            if fm.fileExists(atPath: fileTarget.path) {
+                // A cross-volume move copies to the final name, so a quit or
+                // error mid-copy leaves a truncated file behind. The source is
+                // still intact, so a size mismatch means: replace it.
+                if size(of: fileTarget) == size(of: file) {
+                    result.skipped += 1
+                    continue
+                }
+                try fm.removeItem(at: fileTarget)
+                result.replaced += 1
+            }
+            try fm.moveItem(at: file, to: fileTarget)
+            result.moved += 1
+        }
+        removeIfEmpty(source)
+    }
+
+    private static func size(of url: URL) -> Int64? {
+        (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init)
     }
 
     /// Immediate sub-folders of `master` that hold at least one media file.

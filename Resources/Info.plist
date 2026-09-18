@@ -30,6 +30,17 @@
     <true/>
     <key>NSHumanReadableCopyright</key>
     <string>Copyright © 2026 jitternoise</string>
+    <!-- Shown in the macOS permission prompt if the user keeps podcasts in a protected folder. -->
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>Podcast Downloader saves episodes to the folder you choose.</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>Podcast Downloader saves episodes to the folder you choose.</string>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>Podcast Downloader saves episodes to the folder you choose.</string>
+    <key>NSRemovableVolumesUsageDescription</key>
+    <string>Podcast Downloader saves episodes to the folder you choose.</string>
+    <key>NSNetworkVolumesUsageDescription</key>
+    <string>Podcast Downloader saves episodes to the folder you choose.</string>
     <!-- Many podcast hosts still serve feeds and audio over plain http. -->
     <key>NSAppTransportSecurity</key>
     <dict>

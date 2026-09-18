@@ -16,6 +16,8 @@ final class Player {
     private(set) var isPlaying = false
     private(set) var currentTime: Double = 0
     private(set) var duration: Double = 0
+    /// Why the current episode can't be played, if AVFoundation rejected the file.
+    private(set) var error: String?
     var rate: Float = 1.0 {
         didSet {
             player.defaultRate = rate
@@ -35,9 +37,14 @@ final class Player {
     private let player = AVPlayer()
     private var timeObserver: Any?
     private var endObserver: NSObjectProtocol?
+    private var failObserver: NSObjectProtocol?
+    private var statusObserver: NSKeyValueObservation?
     private var lastPersistedAt = Date.distantPast
     /// Set when the current item played to the end; cleared by any seek or new load.
     private var didFinish = false
+    /// Bumped by every play()/stop() so the async load of a superseded item
+    /// can't write its duration or seek into the item that replaced it.
+    private var loadGeneration = 0
 
     init() {
         player.defaultRate = rate
@@ -52,7 +59,7 @@ final class Player {
 
     /// Starts playing a local file, resuming from `startAt` if given.
     func play(_ episode: Episode, from podcast: Podcast, file: URL, startAt: Double = 0) {
-        if self.episode?.id == episode.id {
+        if self.episode?.key == episode.key, error == nil {
             resume()
             return
         }
@@ -64,24 +71,56 @@ final class Player {
         duration = 0
         currentTime = startAt
         didFinish = false
+        error = nil
+        loadGeneration += 1
+        let generation = loadGeneration
 
-        if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
-        endObserver = NotificationCenter.default.addObserver(
-            forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in self?.didReachEnd() }
-        }
-
+        observe(item)
         player.replaceCurrentItem(with: item)
         Task {
-            if let seconds = try? await item.asset.load(.duration).seconds, seconds.isFinite {
-                self.duration = seconds
+            do {
+                let seconds = try await item.asset.load(.duration).seconds
+                guard generation == loadGeneration else { return }   // superseded meanwhile
+                if seconds.isFinite { duration = seconds }
+            } catch {
+                guard generation == loadGeneration else { return }
+                fail("Can't play this file: \(error.localizedDescription)")
+                return
             }
             if startAt > 0 {
                 await player.seek(to: CMTime(seconds: startAt, preferredTimescale: 600))
+                guard generation == loadGeneration else { return }
             }
             resume()
         }
+    }
+
+    private func observe(_ item: AVPlayerItem) {
+        let center = NotificationCenter.default
+        if let endObserver { center.removeObserver(endObserver) }
+        if let failObserver { center.removeObserver(failObserver) }
+        endObserver = center.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.didReachEnd() }
+        }
+        failObserver = center.addObserver(forName: .AVPlayerItemFailedToPlayToEndTime, object: item, queue: .main) { [weak self] note in
+            let reason = (note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error)?.localizedDescription
+            Task { @MainActor in self?.fail("Playback stopped: \(reason ?? "unknown error")") }
+        }
+        statusObserver = item.observe(\.status, options: [.new]) { [weak self] item, _ in
+            guard item.status == .failed else { return }
+            let reason = item.error?.localizedDescription ?? "unknown error"
+            Task { @MainActor in self?.fail("Can't play this file: \(reason)") }
+        }
+    }
+
+    /// The current item is unplayable: keep it loaded so the message has
+    /// context, but stop pretending to play.
+    private func fail(_ message: String) {
+        guard episode != nil, error == nil else { return }
+        player.pause()
+        isPlaying = false
+        error = message
+        MPNowPlayingInfoCenter.default().playbackState = .stopped
     }
 
     // MARK: Transport
@@ -91,7 +130,7 @@ final class Player {
     }
 
     func resume() {
-        guard episode != nil else { return }
+        guard episode != nil, error == nil else { return }
         // AVPlayer sits at the end after finishing; play() alone does nothing.
         if didFinish { seek(to: 0) }
         player.play()          // honours defaultRate
@@ -119,12 +158,15 @@ final class Player {
 
     func stop() {
         pause()
+        loadGeneration += 1
+        statusObserver = nil
         player.replaceCurrentItem(with: nil)
         episode = nil
         podcast = nil
         currentTime = 0
         duration = 0
         didFinish = false
+        error = nil
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         MPNowPlayingInfoCenter.default().playbackState = .stopped
     }

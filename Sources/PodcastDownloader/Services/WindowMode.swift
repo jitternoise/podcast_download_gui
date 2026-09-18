@@ -75,10 +75,12 @@ final class WindowMode {
             main.animator().alphaValue = 0
             mini.animator().alphaValue = 1
         }, completionHandler: { [weak self] in
-            // If expand() ran during the fade it owns the main window now.
-            guard self?.transition == generation else { return }
-            main.orderOut(nil)
-            main.alphaValue = 1
+            MainActor.assumeIsolated {
+                // If expand() ran during the fade it owns the main window now.
+                guard self?.transition == generation else { return }
+                main.orderOut(nil)
+                main.alphaValue = 1
+            }
         })
     }
 

@@ -5,10 +5,17 @@ import SwiftUI
 /// separate mini-player window on demand without disturbing this one.
 struct RootView: View {
     @Environment(AppModel.self) private var model
+    @State private var showLoadError = false
 
     var body: some View {
         ContentView()
             .frame(minWidth: 900, minHeight: 560)
+            .onAppear { showLoadError = model.library.loadError != nil }
+            .alert("Subscriptions couldn't be loaded", isPresented: $showLoadError) {
+                Button("OK") {}
+            } message: {
+                Text(model.library.loadError ?? "")
+            }
             .background(WindowAccessor { window in
                 model.windowMode.mainWindow = window
             })

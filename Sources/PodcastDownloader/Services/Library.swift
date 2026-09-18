@@ -17,6 +17,8 @@ struct EpisodeRef: Identifiable, Hashable {
 @Observable
 final class Library {
     private struct Snapshot: Codable {
+        /// 1 (or absent): per-episode maps keyed by guid. 2: keyed by `Episode.key`.
+        var version: Int?
         var podcasts: [Podcast]
         var episodes: [String: [Episode]]
         var downloaded: [String: String]
@@ -24,20 +26,27 @@ final class Library {
         var playbackPositions: [String: Double]?
         var lastFullRefresh: Date?
     }
+    private static let currentVersion = 2
 
     private(set) var podcasts: [Podcast] = []
     private(set) var episodes: [String: [Episode]] = [:]     // podcast id -> episodes, newest first
-    private(set) var downloaded: [String: String] = [:] {   // episode id -> path relative to master folder
+    private(set) var downloaded: [String: String] = [:] {   // episode key -> path relative to master folder
         didSet { downloadedOwners = Dictionary(downloaded.map { ($1, $0) }, uniquingKeysWith: { a, _ in a }) }
     }
-    private var downloadedOwners: [String: String] = [:]     // relative path -> episode id
+    private var downloadedOwners: [String: String] = [:]     // relative path -> episode key
     private(set) var lastRefreshed: [String: Date] = [:]     // podcast id -> date
-    private(set) var playbackPositions: [String: Double] = [:] // episode id -> seconds listened to
+    private(set) var playbackPositions: [String: Double] = [:] // episode key -> seconds listened to
     private(set) var lastFullRefresh: Date?                    // when every subscription was last refreshed together
     private(set) var refreshing: Set<String> = []
     var refreshErrors: [String: String] = [:]                // podcast id -> last error
+    /// Set when library.json existed but couldn't be read; the file was kept aside.
+    private(set) var loadError: String?
+
+    /// Fetches a feed. Replaceable so refresh logic can be tested without a network.
+    var loadFeed: (URL) async throws -> ParsedFeed = FeedLoader.load
 
     private let fileURL: URL
+    private var didBackUpThisSession = false
 
     /// - Parameter fileURL: where to persist; defaults to Application Support. Tests pass a temp file.
     init(fileURL: URL? = nil) {
@@ -85,7 +94,7 @@ final class Library {
 
     /// Path relative to the master folder where this episode was saved, if known.
     func downloadedRelativePath(for episode: Episode) -> String? {
-        downloaded[episode.id]
+        downloaded[episode.key]
     }
 
     /// The episode recorded as having been saved to this master-relative path, if any.
@@ -117,7 +126,7 @@ final class Library {
     }
 
     func markDownloaded(_ episode: Episode, relativePath: String) {
-        downloaded[episode.id] = relativePath
+        downloaded[episode.key] = relativePath
         save()
     }
 
@@ -127,16 +136,16 @@ final class Library {
     }
 
     func playbackPosition(for episode: Episode) -> Double {
-        playbackPositions[episode.id] ?? 0
+        playbackPositions[episode.key] ?? 0
     }
 
     func setPlaybackPosition(_ seconds: Double, for episode: Episode) {
-        playbackPositions[episode.id] = seconds > 0 ? seconds : nil
+        playbackPositions[episode.key] = seconds > 0 ? seconds : nil
         save()
     }
 
     func forgetDownload(_ episode: Episode) {
-        downloaded[episode.id] = nil
+        downloaded[episode.key] = nil
         save()
     }
 
@@ -157,7 +166,11 @@ final class Library {
 
     /// Cache episodes for a podcast the user is only previewing (not subscribed).
     func cacheEpisodes(_ list: [Episode], for podcast: Podcast) {
-        episodes[podcast.id] = list
+        episodes[podcast.id] = Self.stamp(list, with: podcast.id)
+    }
+
+    private static func stamp(_ list: [Episode], with podcastID: String) -> [Episode] {
+        list.map { var e = $0; e.podcastID = podcastID; return e }
     }
 
     // MARK: Refresh
@@ -171,8 +184,11 @@ final class Library {
         defer { refreshing.remove(podcast.id) }
 
         do {
-            let feed = try await FeedLoader.load(podcast.feedURL)
-            let sorted = feed.episodes.sorted { ($0.publishedAt ?? .distantPast) > ($1.publishedAt ?? .distantPast) }
+            let feed = try await loadFeed(podcast.feedURL)
+            let sorted = Self.stamp(
+                feed.episodes.sorted { ($0.publishedAt ?? .distantPast) > ($1.publishedAt ?? .distantPast) },
+                with: podcast.id
+            )
             let previousIDs = Set((episodes[podcast.id] ?? []).map(\.id))
             let hadPrevious = lastRefreshed[podcast.id] != nil
             let newEpisodes = hadPrevious ? sorted.filter { !previousIDs.contains($0.id) } : []
@@ -180,13 +196,16 @@ final class Library {
             episodes[podcast.id] = sorted
             refreshErrors[podcast.id] = nil
 
-            if isSubscribed(podcast) {
-                var updated = podcast
+            // Overlay the feed's metadata onto the *current* record, not the
+            // value captured before the await: the user may have toggled
+            // auto-download (or anything else) while the feed was loading.
+            if let idx = podcasts.firstIndex(where: { $0.id == podcast.id }) {
+                var updated = podcasts[idx]
                 if !feed.title.isEmpty { updated.title = feed.title }
                 if !feed.author.isEmpty { updated.author = feed.author }
                 if !feed.summary.isEmpty { updated.summary = feed.summary }
                 if updated.artworkURL == nil { updated.artworkURL = feed.artworkURL }
-                if let idx = podcasts.firstIndex(where: { $0.id == podcast.id }) { podcasts[idx] = updated }
+                podcasts[idx] = updated
                 lastRefreshed[podcast.id] = Date()
                 save()
             }
@@ -200,20 +219,53 @@ final class Library {
     // MARK: Persistence
 
     private func load() {
-        guard let data = try? Data(contentsOf: fileURL) else { return }
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: fileURL.path) else { return }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        guard let snap = try? decoder.decode(Snapshot.self, from: data) else { return }
+        let snap: Snapshot
+        do {
+            snap = try decoder.decode(Snapshot.self, from: try Data(contentsOf: fileURL))
+        } catch {
+            // Never let the next save() bury a file we couldn't read: keep it
+            // aside under a name the user can find, and say so.
+            let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+            let aside = fileURL.deletingLastPathComponent().appendingPathComponent("\(fileURL.lastPathComponent).corrupt-\(stamp)")
+            try? fm.moveItem(at: fileURL, to: aside)
+            loadError = "The subscriptions file couldn't be read (\(error.localizedDescription)). It was kept as \(aside.lastPathComponent) and the app started with an empty library."
+            NSLog("Failed to load library: \(error)")
+            return
+        }
         podcasts = snap.podcasts
         episodes = snap.episodes
         downloaded = snap.downloaded
         lastRefreshed = snap.lastRefreshed
         playbackPositions = snap.playbackPositions ?? [:]
         lastFullRefresh = snap.lastFullRefresh
+        if (snap.version ?? 1) < 2 { migrateToCompositeKeys() }
+    }
+
+    /// v1 keyed downloads and positions by the feed's guid alone; stamp the
+    /// cached episodes with their podcast and re-key under `Episode.key`.
+    private func migrateToCompositeKeys() {
+        for (podcastID, list) in episodes {
+            let stamped = Self.stamp(list, with: podcastID)
+            episodes[podcastID] = stamped
+            for episode in stamped where episode.key != episode.id {
+                if downloaded[episode.key] == nil, let path = downloaded.removeValue(forKey: episode.id) {
+                    downloaded[episode.key] = path
+                }
+                if playbackPositions[episode.key] == nil, let pos = playbackPositions.removeValue(forKey: episode.id) {
+                    playbackPositions[episode.key] = pos
+                }
+            }
+        }
+        save()
     }
 
     private func save() {
         let snap = Snapshot(
+            version: Self.currentVersion,
             podcasts: podcasts,
             episodes: episodes.filter { key, _ in podcasts.contains { $0.id == key } },
             downloaded: downloaded,
@@ -225,10 +277,22 @@ final class Library {
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         do {
+            backUpOncePerSession()
             let data = try encoder.encode(snap)
             try data.write(to: fileURL, options: .atomic)
         } catch {
             NSLog("Failed to save library: \(error)")
         }
+    }
+
+    /// Keeps last session's file as library.json.bak before this session first overwrites it.
+    private func backUpOncePerSession() {
+        guard !didBackUpThisSession else { return }
+        didBackUpThisSession = true
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: fileURL.path) else { return }
+        let bak = fileURL.appendingPathExtension("bak")
+        try? fm.removeItem(at: bak)
+        try? fm.copyItem(at: fileURL, to: bak)
     }
 }

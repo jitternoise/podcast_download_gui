@@ -110,10 +110,17 @@ struct SearchView: View {
 
         do {
             let feed = try await FeedLoader.load(url)
+            // A pasted web page may have led us to its feed; subscribe to that.
+            let feedURL = feed.sourceURL ?? url
+            if let existing = model.library.podcast(withID: feedURL.absoluteString) {
+                feedText = ""
+                path.append(existing)
+                return
+            }
             let podcast = Podcast(
-                title: feed.title.isEmpty ? url.host ?? "Podcast" : feed.title,
+                title: feed.title.isEmpty ? feedURL.host ?? "Podcast" : feed.title,
                 author: feed.author,
-                feedURL: url,
+                feedURL: feedURL,
                 artworkURL: feed.artworkURL,
                 summary: feed.summary
             )

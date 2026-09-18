@@ -12,9 +12,15 @@ final class DownloadManager {
         didSet { pump() }
     }
 
+    /// Transient failures (sleep, Wi-Fi hand-off, timeouts) are retried this many times by themselves.
+    static let maxAutoRetries = 2
+
     private var tasks: [String: URLSessionDownloadTask] = [:]
     private var onFinished: ((Episode, URL) -> Void)?
     private var transport: DownloadTransport!
+    /// Held while anything is downloading: keeps the Mac from idle-sleeping and
+    /// App Nap from throttling us when the window is hidden.
+    private var activity: NSObjectProtocol?
 
     init() {
         transport = DownloadTransport(
@@ -36,7 +42,7 @@ final class DownloadManager {
     var finishedItems: [DownloadItem] { items.filter { !$0.isActive } }
 
     func item(for episode: Episode) -> DownloadItem? {
-        items.first { $0.id == episode.id }
+        items.first { $0.id == episode.key }
     }
 
     func isQueuedOrActive(_ episode: Episode) -> Bool {
@@ -47,13 +53,22 @@ final class DownloadManager {
 
     func enqueue(_ episode: Episode, from podcast: Podcast, to destination: URL) {
         if let existing = item(for: episode), existing.isActive { return }
-        items.removeAll { $0.id == episode.id }
-        items.append(DownloadItem(id: episode.id, episode: episode, podcast: podcast, destination: destination))
+        // A previous attempt at the same destination may have left resume data.
+        let previous = item(for: episode)
+        items.removeAll { $0.id == episode.key }
+        var item = DownloadItem(id: episode.key, episode: episode, podcast: podcast, destination: destination)
+        if previous?.destination == destination { item.resumeData = previous?.resumeData }
+        items.append(item)
         pump()
     }
 
     func cancel(_ id: String) {
-        tasks[id]?.cancel()
+        if let task = tasks[id] {
+            // Keep what was transferred so a later retry can continue.
+            task.cancel { [weak self] data in
+                Task { @MainActor in self?.storeResumeData(data, for: id) }
+            }
+        }
         tasks[id] = nil
         transport.forget(id)
         setState(id, .cancelled)
@@ -78,6 +93,7 @@ final class DownloadManager {
 
     /// Start queued downloads until the concurrency limit is reached.
     private func pump() {
+        defer { updateActivity() }
         let running = items.filter { $0.state == .downloading }.count
         var slots = max(0, maxConcurrent - running)
         guard slots > 0 else { return }
@@ -92,6 +108,24 @@ final class DownloadManager {
         }
     }
 
+    private func updateActivity() {
+        let busy = items.contains { $0.state == .downloading }
+        if busy, activity == nil {
+            activity = ProcessInfo.processInfo.beginActivity(
+                options: [.userInitiated, .idleSystemSleepDisabled],
+                reason: "Downloading podcast episodes"
+            )
+        } else if !busy, let activity {
+            ProcessInfo.processInfo.endActivity(activity)
+            self.activity = nil
+        }
+    }
+
+    private func storeResumeData(_ data: Data?, for id: String) {
+        guard let data, let idx = items.firstIndex(where: { $0.id == id }), !items[idx].isActive else { return }
+        items[idx].resumeData = data
+    }
+
     /// Kicks off the transfer. Returns false (and marks the item failed) if it can't.
     private func start(_ item: DownloadItem) -> Bool {
         guard item.episode.enclosureURL.isWebURL else {
@@ -104,14 +138,27 @@ final class DownloadManager {
                 withIntermediateDirectories: true
             )
         } catch {
-            setState(item.id, .failed("Could not create folder: \(error.localizedDescription)"))
+            let ns = error as NSError
+            let denied = ns.domain == NSCocoaErrorDomain && ns.code == NSFileWriteNoPermissionError
+            setState(item.id, .failed(denied
+                ? "macOS denied access to the podcast folder. Allow it in System Settings › Privacy & Security › Files and Folders, or choose another folder in Settings."
+                : "Could not create folder: \(error.localizedDescription)"))
             return false
         }
-        var request = URLRequest(url: item.episode.enclosureURL)
-        request.setValue("PodcastDownloader/1.0 (macOS)", forHTTPHeaderField: "User-Agent")
-        let task = transport.download(request, id: item.id, destination: item.destination)
+        let task: URLSessionDownloadTask
+        if let resumeData = item.resumeData {
+            task = transport.resume(resumeData, id: item.id, destination: item.destination, expected: expected(for: item))
+        } else {
+            var request = URLRequest(url: item.episode.enclosureURL)
+            request.setValue("PodcastDownloader/1.0 (macOS)", forHTTPHeaderField: "User-Agent")
+            task = transport.download(request, id: item.id, destination: item.destination, expected: expected(for: item))
+        }
         tasks[item.id] = task
         return true
+    }
+
+    private func expected(for item: DownloadItem) -> DownloadTransport.Expectation {
+        .init(mimeType: item.episode.mimeType, length: item.episode.enclosureLength)
     }
 
     // MARK: Callbacks
@@ -122,7 +169,7 @@ final class DownloadManager {
         items[idx].bytesExpected = expected
     }
 
-    private func complete(id: String, result: Result<URL, Error>) {
+    private func complete(id: String, result: Result<URL, DownloadTransport.Failure>) {
         tasks[id] = nil
         guard let idx = items.firstIndex(where: { $0.id == id }) else { return }
         // A cancelled item already had its state set; don't overwrite it.
@@ -132,9 +179,17 @@ final class DownloadManager {
         case .success(let url):
             items[idx].state = .finished
             items[idx].bytesReceived = items[idx].bytesExpected
+            items[idx].resumeData = nil
             onFinished?(items[idx].episode, url)
-        case .failure(let error):
-            items[idx].state = .failed(error.localizedDescription)
+        case .failure(let failure):
+            items[idx].resumeData = failure.resumeData
+            if failure.isTransient, items[idx].autoRetries < Self.maxAutoRetries {
+                // Sleep, a Wi-Fi hand-off or a stalled CDN: pick up where it stopped.
+                items[idx].autoRetries += 1
+                items[idx].state = .queued
+            } else {
+                items[idx].state = .failed(failure.error.localizedDescription)
+            }
         }
         pump()
     }
@@ -148,11 +203,32 @@ final class DownloadManager {
 /// URLSession delegate wrapper. Lives off the main actor; forwards events via closures.
 final class DownloadTransport: NSObject, URLSessionDownloadDelegate {
     typealias ProgressHandler = (String, Int64, Int64) -> Void
-    typealias CompletionHandler = (String, Result<URL, Error>) -> Void
+    typealias CompletionHandler = (String, Result<URL, Failure>) -> Void
+
+    /// What the feed said about the enclosure, used to spot bodies that aren't audio.
+    struct Expectation {
+        var mimeType: String?
+        var length: Int64?
+    }
+
+    struct Failure: Error {
+        let error: Error
+        /// Present when URLSession can continue the transfer later.
+        let resumeData: Data?
+
+        /// Errors that go away by themselves: lost connection, timeout, offline.
+        var isTransient: Bool {
+            let ns = error as NSError
+            guard ns.domain == NSURLErrorDomain else { return false }
+            return [NSURLErrorNetworkConnectionLost, NSURLErrorTimedOut, NSURLErrorNotConnectedToInternet,
+                    NSURLErrorCannotConnectToHost, NSURLErrorDNSLookupFailed].contains(ns.code)
+        }
+    }
 
     private struct Pending {
         let id: String
         let destination: URL
+        let expected: Expectation
     }
 
     private let onProgress: ProgressHandler
@@ -169,12 +245,22 @@ final class DownloadTransport: NSObject, URLSessionDownloadDelegate {
         config.timeoutIntervalForRequest = 60
         config.timeoutIntervalForResource = 6 * 60 * 60
         config.httpMaximumConnectionsPerHost = 4
+        // After sleep or a network change, wait for connectivity instead of
+        // failing the whole queue with "offline".
+        config.waitsForConnectivity = true
         session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
     }
 
-    func download(_ request: URLRequest, id: String, destination: URL) -> URLSessionDownloadTask {
+    func download(_ request: URLRequest, id: String, destination: URL, expected: Expectation) -> URLSessionDownloadTask {
         let task = session.downloadTask(with: request)
-        lock.withLock { pending[task.taskIdentifier] = Pending(id: id, destination: destination) }
+        lock.withLock { pending[task.taskIdentifier] = Pending(id: id, destination: destination, expected: expected) }
+        task.resume()
+        return task
+    }
+
+    func resume(_ resumeData: Data, id: String, destination: URL, expected: Expectation) -> URLSessionDownloadTask {
+        let task = session.downloadTask(withResumeData: resumeData)
+        lock.withLock { pending[task.taskIdentifier] = Pending(id: id, destination: destination, expected: expected) }
         task.resume()
         return task
     }
@@ -204,7 +290,11 @@ final class DownloadTransport: NSObject, URLSessionDownloadDelegate {
         guard let p = take(downloadTask) else { return }
 
         if let http = downloadTask.response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-            onComplete(p.id, .failure(FeedError(message: "Server returned HTTP \(http.statusCode).")))
+            onComplete(p.id, .failure(Failure(error: FeedError(message: "Server returned HTTP \(http.statusCode)."), resumeData: nil)))
+            return
+        }
+        if let reason = Self.rejectionReason(for: location, response: downloadTask.response, expected: p.expected) {
+            onComplete(p.id, .failure(Failure(error: FeedError(message: reason), resumeData: nil)))
             return
         }
 
@@ -217,14 +307,32 @@ final class DownloadTransport: NSObject, URLSessionDownloadDelegate {
             try fm.moveItem(at: location, to: p.destination)
             onComplete(p.id, .success(p.destination))
         } catch {
-            onComplete(p.id, .failure(error))
+            onComplete(p.id, .failure(Failure(error: error, resumeData: nil)))
         }
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         // Success is reported from didFinishDownloadingTo; here we only care about failures.
         guard let error, let p = take(task) else { return }
-        if (error as NSError).code == NSURLErrorCancelled { return }
-        onComplete(p.id, .failure(error))
+        let ns = error as NSError
+        if ns.code == NSURLErrorCancelled { return }
+        let resumeData = ns.userInfo[NSURLSessionDownloadTaskResumeData] as? Data
+        onComplete(p.id, .failure(Failure(error: error, resumeData: resumeData)))
+    }
+
+    /// A 200 with a web page in it (captive portal, hot-link block page) must
+    /// not be saved as the episode. Nil means the body looks like media.
+    static func rejectionReason(for file: URL, response: URLResponse?, expected: Expectation) -> String? {
+        let mime = response?.mimeType?.lowercased() ?? ""
+        if mime.hasPrefix("text/") || mime.contains("html") || mime.contains("xml") || mime.contains("json") {
+            return "Server returned a web page instead of audio (\(mime))."
+        }
+        guard let handle = try? FileHandle(forReadingFrom: file) else { return nil }
+        defer { try? handle.close() }
+        let head = (try? handle.read(upToCount: 1024)) ?? Data()
+        if HTMLSniffer.looksLikeHTML(head) {
+            return "Server returned a web page instead of audio."
+        }
+        return nil
     }
 }

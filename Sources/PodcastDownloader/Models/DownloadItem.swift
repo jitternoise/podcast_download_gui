@@ -9,7 +9,7 @@ struct DownloadItem: Identifiable, Hashable {
         case cancelled
     }
 
-    let id: String            // episode id
+    let id: String            // Episode.key
     let episode: Episode
     let podcast: Podcast
     let destination: URL
@@ -17,6 +17,11 @@ struct DownloadItem: Identifiable, Hashable {
     var bytesReceived: Int64 = 0
     var bytesExpected: Int64 = -1
     let createdAt = Date()
+    /// Partial-transfer data URLSession handed back on failure or cancel, so a
+    /// retry continues where it stopped instead of starting from byte 0.
+    var resumeData: Data?
+    /// Automatic retries used so far for transient network errors.
+    var autoRetries = 0
 
     var progress: Double? {
         guard bytesExpected > 0 else { return nil }

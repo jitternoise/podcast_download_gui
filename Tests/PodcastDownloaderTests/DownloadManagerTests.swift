@@ -35,6 +35,33 @@ final class DownloadManagerTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("Show/local.mp3").path))
     }
 
+    func testWebPageBodiesAreRejected() throws {
+        let html = root.appendingPathComponent("page.tmp")
+        try Data("<!DOCTYPE html><html><body>Sign in to the network</body></html>".utf8).write(to: html)
+        let audio = root.appendingPathComponent("audio.tmp")
+        try Data([0x49, 0x44, 0x33, 0x04, 0x00] + [UInt8](repeating: 0, count: 2000)).write(to: audio)   // "ID3" tag
+        let url = URL(string: "https://example.com/x.mp3")!
+        let expected = DownloadTransport.Expectation(mimeType: "audio/mpeg", length: 5_000_000)
+
+        XCTAssertNotNil(DownloadTransport.rejectionReason(for: html, response: nil, expected: expected))
+        XCTAssertNotNil(DownloadTransport.rejectionReason(
+            for: audio, response: HTTPURLResponse(url: url, mimeType: "text/html", expectedContentLength: 0, textEncodingName: nil), expected: expected))
+        XCTAssertNil(DownloadTransport.rejectionReason(
+            for: audio, response: HTTPURLResponse(url: url, mimeType: "audio/mpeg", expectedContentLength: 0, textEncodingName: nil), expected: expected))
+        XCTAssertNil(DownloadTransport.rejectionReason(for: audio, response: nil, expected: expected))
+    }
+
+    func testTransientNetworkErrorsAreRecognised() {
+        func failure(_ code: Int) -> DownloadTransport.Failure {
+            .init(error: NSError(domain: NSURLErrorDomain, code: code), resumeData: nil)
+        }
+        XCTAssertTrue(failure(NSURLErrorNetworkConnectionLost).isTransient)
+        XCTAssertTrue(failure(NSURLErrorTimedOut).isTransient)
+        XCTAssertTrue(failure(NSURLErrorNotConnectedToInternet).isTransient)
+        XCTAssertFalse(failure(NSURLErrorBadServerResponse).isTransient)
+        XCTAssertFalse(DownloadTransport.Failure(error: FeedError(message: "HTTP 404"), resumeData: nil).isTransient)
+    }
+
     func testFailedStartDoesNotBlockTheQueue() {
         let manager = DownloadManager()
         manager.maxConcurrent = 1

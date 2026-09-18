@@ -103,6 +103,48 @@ final class LibraryFolderTests: XCTestCase {
         XCTAssertTrue(exists("new/Show A/one.mp3"))
     }
 
+    func testMergeReplacesTruncatedCopyFromAnInterruptedMove() throws {
+        try touch("old/Show A/one.mp3", bytes: 100)
+        try touch("old/Show A/two.mp3", bytes: 50)
+        try touch("new/Show A/one.mp3", bytes: 10)       // partial copy left by a quit mid-move
+        try touch("new/Show A/two.mp3", bytes: 50)       // genuine duplicate: keep
+
+        let result = try LibraryFolder.move(from: root.appendingPathComponent("old"), to: root.appendingPathComponent("new"))
+
+        XCTAssertEqual(result.replaced, 1)
+        XCTAssertEqual(result.skipped, 1)
+        let size = try FileManager.default.attributesOfItem(atPath: root.appendingPathComponent("new/Show A/one.mp3").path)[.size] as? Int
+        XCTAssertEqual(size, 100)
+        XCTAssertFalse(exists("old/Show A/one.mp3"))
+        XCTAssertTrue(exists("old/Show A/two.mp3"), "the skipped duplicate stays behind")
+    }
+
+    func testMoveContinuesPastAFailingFolder() throws {
+        try touch("old/Show A/one.mp3")
+        try touch("old/Show B/two.mp3")
+        try touch("new/Show B")                          // a *file* where the folder should go: Show B can't merge
+
+        let result = try LibraryFolder.move(from: root.appendingPathComponent("old"), to: root.appendingPathComponent("new"))
+
+        XCTAssertEqual(result.total, 2)
+        XCTAssertEqual(result.moved, 1)
+        XCTAssertEqual(result.failed.count, 1)
+        XCTAssertTrue(result.failed[0].hasPrefix("Show B:"), result.failed[0])
+        XCTAssertFalse(result.isComplete)
+        XCTAssertTrue(exists("new/Show A/one.mp3"), "the folder that could move did")
+        XCTAssertTrue(exists("old/Show B/two.mp3"), "the one that couldn't is untouched")
+        XCTAssertTrue(exists("old"))
+    }
+
+    func testCheckReportsMissingFoldersButAcceptsUncreatedOnes() throws {
+        try touch("master/Show A/one.mp3")
+        XCTAssertNil(LibraryFolder.check(root.appendingPathComponent("master")))
+        XCTAssertNil(LibraryFolder.check(root.appendingPathComponent("not-yet-created")), "parent exists; first download creates it")
+        XCTAssertEqual(LibraryFolder.check(root.appendingPathComponent("gone/volume/Podcasts")), .missing)
+        try touch("a-file")
+        XCTAssertEqual(LibraryFolder.check(root.appendingPathComponent("a-file")), .missing)
+    }
+
     func testMoveRemovesEmptyOldRoot() throws {
         try touch("old/Show A/one.mp3")
         _ = try LibraryFolder.move(from: root.appendingPathComponent("old"), to: root.appendingPathComponent("new"))

@@ -6,6 +6,9 @@ struct ParsedFeed {
     var summary: String = ""
     var artworkURL: URL?
     var episodes: [Episode] = []
+    /// The URL the feed was actually fetched from — differs from what the user
+    /// pasted when a web page pointed us at its RSS feed.
+    var sourceURL: URL?
 }
 
 struct FeedError: LocalizedError {
@@ -16,21 +19,74 @@ struct FeedError: LocalizedError {
 /// Fetches and parses an RSS 2.0 podcast feed (with the common iTunes extensions).
 enum FeedLoader {
     static func load(_ url: URL) async throws -> ParsedFeed {
+        try await load(url, followingDiscovery: true)
+    }
+
+    private static func load(_ url: URL, followingDiscovery: Bool) async throws -> ParsedFeed {
+        guard url.isWebURL else { throw FeedError(message: "Only http and https feed addresses are supported.") }
         var request = URLRequest(url: url)
         request.setValue("PodcastDownloader/1.0 (macOS)", forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 30
+        // A refresh must ask the server; a feed served with Cache-Control: max-age
+        // would otherwise be answered from URLCache for the whole window.
+        request.cachePolicy = .reloadIgnoringLocalCacheData
 
         let (data, response) = try await URLSession.shared.data(for: request)
         if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
             throw FeedError(message: "Feed returned HTTP \(http.statusCode).")
         }
-        return try FeedParser().parse(data)
+
+        // The most common mistake is pasting the show's web page. If that page
+        // advertises its feed, use it; otherwise say what went wrong.
+        let mime = (response as? HTTPURLResponse)?.mimeType?.lowercased() ?? ""
+        if mime.contains("html") || HTMLSniffer.looksLikeHTML(data) {
+            if followingDiscovery, let feed = HTMLSniffer.discoverFeed(in: data, relativeTo: url) {
+                return try await load(feed, followingDiscovery: false)
+            }
+            throw FeedError(message: "That address is a web page, not an RSS feed.")
+        }
+        var feed = try FeedParser().parse(data)
+        feed.sourceURL = url
+        return feed
+    }
+}
+
+enum HTMLSniffer {
+    static func looksLikeHTML(_ data: Data) -> Bool {
+        let head = String(decoding: data.prefix(1024), as: UTF8.self).lowercased()
+        return head.contains("<!doctype html") || head.contains("<html")
+    }
+
+    /// The first `<link rel="alternate" type="application/rss+xml" href="…">` on the page.
+    static func discoverFeed(in data: Data, relativeTo base: URL) -> URL? {
+        let html = String(decoding: data, as: UTF8.self)
+        guard let regex = try? NSRegularExpression(pattern: "<link\\b[^>]*>", options: .caseInsensitive) else { return nil }
+        let range = NSRange(html.startIndex..., in: html)
+        for match in regex.matches(in: html, range: range) {
+            guard let r = Range(match.range, in: html) else { continue }
+            let tag = String(html[r])
+            guard tag.range(of: "application/rss+xml", options: .caseInsensitive) != nil,
+                  let href = attribute("href", in: tag),
+                  let url = URL(string: href, relativeTo: base)?.absoluteURL, url.isWebURL
+            else { continue }
+            return url
+        }
+        return nil
+    }
+
+    private static func attribute(_ name: String, in tag: String) -> String? {
+        let pattern = "\\b\(name)\\s*=\\s*[\"']([^\"']+)[\"']"
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
+              let m = regex.firstMatch(in: tag, range: NSRange(tag.startIndex..., in: tag)),
+              let r = Range(m.range(at: 1), in: tag) else { return nil }
+        return String(tag[r]).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
 final class FeedParser: NSObject, XMLParserDelegate {
     private var feed = ParsedFeed()
-    private var parseError: Error?
+    private var rootElement: String?
+    private var seenIDs: Set<String> = []
 
     // Parsing state
     private var inItem = false
@@ -48,12 +104,18 @@ final class FeedParser: NSObject, XMLParserDelegate {
     private var itemEnclosureType: String?
 
     func parse(_ data: Data) throws -> ParsedFeed {
-        let parser = XMLParser(data: data)
-        parser.delegate = self
-        parser.shouldProcessNamespaces = false
-        guard parser.parse() else {
-            let detail = parser.parserError?.localizedDescription ?? "unknown error"
-            throw FeedError(message: "Could not parse feed: \(detail)")
+        if let error = run(data) {
+            // Many real feeds contain HTML entities like &nbsp; outside CDATA,
+            // which XMLParser rejects outright. Retry once with them escaped.
+            guard let lenient = HTMLEntities.escapeNonXMLEntities(in: data) else { throw error }
+            reset()
+            if let stillFailing = run(lenient) { throw stillFailing }
+        }
+        switch rootElement {
+        case "rss", "rdf:RDF": break
+        case "feed": throw FeedError(message: "This is an Atom feed; only RSS podcast feeds are supported.")
+        case "html": throw FeedError(message: "That address is a web page, not an RSS feed.")
+        default: throw FeedError(message: "This URL does not look like a podcast RSS feed.")
         }
         if feed.title.isEmpty, feed.episodes.isEmpty {
             throw FeedError(message: "This URL does not look like a podcast RSS feed.")
@@ -64,11 +126,34 @@ final class FeedParser: NSObject, XMLParserDelegate {
         return feed
     }
 
+    /// One parse pass; nil on success.
+    private func run(_ data: Data) -> FeedError? {
+        let parser = XMLParser(data: data)
+        parser.delegate = self
+        parser.shouldProcessNamespaces = false
+        if parser.parse() { return nil }
+        // XMLParser's own codes are not meaningful to users (nearly everything
+        // is reported as 111); the line number is.
+        let line = parser.lineNumber
+        return FeedError(message: line > 0 ? "The feed isn't valid XML (line \(line))." : "The feed isn't valid XML.")
+    }
+
+    private func reset() {
+        feed = ParsedFeed()
+        rootElement = nil
+        seenIDs = []
+        inItem = false
+        inImageElement = false
+        text = ""
+        resetItem()
+    }
+
     // MARK: XMLParserDelegate
 
     func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?,
                 qualifiedName: String?, attributes: [String: String]) {
         text = ""
+        if rootElement == nil { rootElement = elementName }
         switch elementName {
         case "item":
             inItem = true
@@ -146,7 +231,12 @@ final class FeedParser: NSObject, XMLParserDelegate {
         // downloader at file:// or other local schemes.
         guard let enclosure = itemEnclosureURL?.trimmingCharacters(in: .whitespacesAndNewlines),
               let url = URL(string: enclosure), url.isWebURL else { return }
-        let id = itemGUID.isEmpty ? enclosure : itemGUID
+        // Feeds do reuse guids. Keep ids unique so lists, the download queue and
+        // the downloaded/position maps can't conflate two episodes.
+        var id = itemGUID.isEmpty ? enclosure : itemGUID
+        if seenIDs.contains(id) { id += "|" + enclosure }
+        if seenIDs.contains(id) { id += "#" + String(feed.episodes.count + 1) }
+        seenIDs.insert(id)
         let summary = itemSummary.isEmpty ? itemDescription : itemSummary
         feed.episodes.append(Episode(
             id: id,
@@ -198,6 +288,45 @@ enum RSSDate {
             if let d = df.date(from: s) { return d }
         }
         return ISO8601DateFormatter().date(from: s)
+    }
+}
+
+enum HTMLEntities {
+    /// Named HTML entities feeds commonly leak into XML, mapped to code points.
+    static let named: [String: Int] = [
+        "nbsp": 0xA0, "copy": 0xA9, "reg": 0xAE, "trade": 0x2122, "deg": 0xB0, "middot": 0xB7,
+        "ndash": 0x2013, "mdash": 0x2014, "lsquo": 0x2018, "rsquo": 0x2019, "sbquo": 0x201A,
+        "ldquo": 0x201C, "rdquo": 0x201D, "bdquo": 0x201E, "hellip": 0x2026, "bull": 0x2022,
+        "laquo": 0xAB, "raquo": 0xBB, "euro": 0x20AC, "pound": 0xA3, "yen": 0xA5, "cent": 0xA2,
+        "sect": 0xA7, "para": 0xB6, "times": 0xD7, "divide": 0xF7, "frac12": 0xBD, "frac14": 0xBC,
+        "eacute": 0xE9, "egrave": 0xE8, "ecirc": 0xEA, "agrave": 0xE0, "aacute": 0xE1, "acirc": 0xE2,
+        "auml": 0xE4, "ouml": 0xF6, "uuml": 0xFC, "Auml": 0xC4, "Ouml": 0xD6, "Uuml": 0xDC, "szlig": 0xDF,
+        "ccedil": 0xE7, "ntilde": 0xF1, "iacute": 0xED, "oacute": 0xF3, "uacute": 0xFA, "Eacute": 0xC9,
+        "aring": 0xE5, "oslash": 0xF8, "aelig": 0xE6, "iexcl": 0xA1, "iquest": 0xBF, "shy": 0xAD,
+    ]
+    private static let xmlBuiltins: Set<String> = ["amp", "lt", "gt", "quot", "apos"]
+
+    /// Replaces `&name;` references XML doesn't know with numeric ones (or
+    /// escapes the ampersand when the name is unknown). Returns nil when the
+    /// data isn't UTF-8 or nothing needed changing.
+    static func escapeNonXMLEntities(in data: Data) -> Data? {
+        guard let text = String(data: data, encoding: .utf8),
+              let regex = try? NSRegularExpression(pattern: "&([A-Za-z][A-Za-z0-9]*);") else { return nil }
+        let ns = text as NSString
+        var out = ""
+        var cursor = 0
+        var changed = false
+        for match in regex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+            let name = ns.substring(with: match.range(at: 1))
+            guard !xmlBuiltins.contains(name) else { continue }
+            out += ns.substring(with: NSRange(location: cursor, length: match.range.location - cursor))
+            out += named[name].map { "&#\($0);" } ?? "&amp;\(name);"
+            cursor = match.range.location + match.range.length
+            changed = true
+        }
+        guard changed else { return nil }
+        out += ns.substring(from: cursor)
+        return Data(out.utf8)
     }
 }
 

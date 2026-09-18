@@ -19,7 +19,7 @@ struct PodcastDetailView: View {
         .navigationTitle(current.title)
         .toolbar { toolbarContent }
         .task(id: podcast.id) {
-            if episodes.isEmpty { await model.refresh(podcast) }
+            if episodes.isEmpty { await model.refresh(current) }
         }
     }
 
@@ -127,7 +127,7 @@ struct PodcastDetailView: View {
             }
 
             Button {
-                Task { await model.refresh(podcast) }
+                Task { await model.refresh(current) }
             } label: {
                 Label("Refresh", systemImage: "arrow.clockwise")
             }

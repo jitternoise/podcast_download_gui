@@ -47,7 +47,7 @@ struct SettingsView: View {
                         Text(option.label).tag(option.minutes)
                     }
                 }
-                Text("Applies to the automatic refresh when the app launches. Refresh All (⌘R) always checks immediately.")
+                Text("Automatic checks happen at launch, after the Mac wakes, when the app comes to the front, and periodically while it stays open. Refresh All (⌘R) always checks immediately.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 if let last = model.library.lastFullRefresh {

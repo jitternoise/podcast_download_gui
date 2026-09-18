@@ -104,6 +104,42 @@ final class PlayerTests: XCTestCase {
         player.stop()
     }
 
+    func testSwitchingEpisodesMidLoadDoesNotLeakTheFirstLoad() async throws {
+        let short = FileManager.default.temporaryDirectory.appendingPathComponent("five-\(UUID().uuidString).wav")
+        try Self.makeWAV(seconds: 5, to: short)
+        defer { try? FileManager.default.removeItem(at: short) }
+        let other = Episode(id: "ep2", title: "Five", summary: "", publishedAt: nil, enclosureURL: short,
+                            enclosureLength: nil, mimeType: "audio/wav", duration: nil)
+
+        let player = Player()
+        player.play(episode, from: podcast, file: file, startAt: 12)   // 30 s file, resume at 12
+        player.play(other, from: podcast, file: short)                  // before the first load finishes
+        try await waitUntil { player.isPlaying }
+        try await Task.sleep(for: .seconds(0.3))
+
+        XCTAssertEqual(player.episode?.id, "ep2")
+        XCTAssertEqual(player.duration, 5, accuracy: 0.1, "duration is the second file's, not the first's")
+        XCTAssertLessThan(player.currentTime, 2, "the first episode's seek to 12 s must not land on the second")
+        player.stop()
+    }
+
+    func testUnplayableFileReportsAnErrorInsteadOfPlaying() async throws {
+        let bogus = FileManager.default.temporaryDirectory.appendingPathComponent("bogus-\(UUID().uuidString).mp3")
+        try Data("<html><body>hotlinking not allowed</body></html>".utf8).write(to: bogus)
+        defer { try? FileManager.default.removeItem(at: bogus) }
+
+        let player = Player()
+        player.play(episode, from: podcast, file: bogus)
+        try await waitUntil { player.error != nil }
+
+        XCTAssertFalse(player.isPlaying)
+        XCTAssertTrue(player.hasItem, "the episode stays loaded so the message has context")
+        player.togglePlayPause()
+        XCTAssertFalse(player.isPlaying, "play is refused while the item is broken")
+        player.stop()
+        XCTAssertNil(player.error)
+    }
+
     // MARK: Helpers
 
     private func waitUntil(timeout: Double = 5, _ condition: @escaping () -> Bool) async throws {

@@ -69,12 +69,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.player.flushPosition()
 
         let active = model.downloads.activeItems.count
-        guard active > 0 else { return .terminateNow }
+        let moving = model.moveStatus != nil
+        guard active > 0 || moving else { return .terminateNow }
         let alert = NSAlert()
-        alert.messageText = active == 1
-            ? "A download is still in progress."
-            : "\(active) downloads are still in progress."
-        alert.informativeText = "If you quit now they will be cancelled and will have to start over."
+        if moving {
+            alert.messageText = "Your library is still being moved."
+            alert.informativeText = "Quitting now can leave it split across two folders."
+        } else {
+            alert.messageText = active == 1
+                ? "A download is still in progress."
+                : "\(active) downloads are still in progress."
+            alert.informativeText = "If you quit now they will be cancelled and will have to start over."
+        }
         alert.addButton(withTitle: "Quit")
         alert.addButton(withTitle: "Cancel")
         return alert.runModal() == .alertFirstButtonReturn ? .terminateNow : .terminateCancel

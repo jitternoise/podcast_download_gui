@@ -58,6 +58,59 @@ final class FeedParserTests: XCTestCase {
         XCTAssertThrowsError(try FeedParser().parse(Data("<html><body>hi</body></html>".utf8)))
     }
 
+    func testRejectsAtomAndWebPagesWithClearMessages() {
+        let atom = "<feed xmlns=\"http://www.w3.org/2005/Atom\"><title>Blog</title><entry><title>x</title></entry></feed>"
+        XCTAssertThrowsError(try FeedParser().parse(Data(atom.utf8))) { error in
+            XCTAssertTrue(error.localizedDescription.contains("Atom"), error.localizedDescription)
+        }
+        let xhtml = "<html><head><title>My Show</title></head><body><p>Welcome</p></body></html>"
+        XCTAssertThrowsError(try FeedParser().parse(Data(xhtml.utf8))) { error in
+            XCTAssertTrue(error.localizedDescription.contains("web page"), error.localizedDescription)
+        }
+        XCTAssertThrowsError(try FeedParser().parse(Data("<rss><channel><title>Broken".utf8))) { error in
+            XCTAssertTrue(error.localizedDescription.contains("valid XML"), error.localizedDescription)
+        }
+    }
+
+    func testToleratesHTMLEntitiesOutsideCDATA() throws {
+        let feed = """
+        <rss version="2.0"><channel><title>T</title>
+          <item><title>It&rsquo;s here&nbsp;now &amp; &unknownthing; too</title><guid>a</guid>
+            <enclosure url="https://example.com/a.mp3" type="audio/mpeg"/></item>
+        </channel></rss>
+        """
+        let parsed = try FeedParser().parse(Data(feed.utf8))
+        XCTAssertEqual(parsed.episodes.count, 1)
+        XCTAssertEqual(parsed.episodes[0].title, "It\u{2019}s here\u{A0}now & &unknownthing; too")
+    }
+
+    func testDuplicateGuidsGetUniqueIDs() throws {
+        let feed = """
+        <rss version="2.0"><channel><title>T</title>
+          <item><title>1</title><guid>g</guid><enclosure url="https://example.com/1.mp3"/></item>
+          <item><title>2</title><guid>g</guid><enclosure url="https://example.com/2.mp3"/></item>
+          <item><title>3</title><guid>g</guid><enclosure url="https://example.com/2.mp3"/></item>
+        </channel></rss>
+        """
+        let parsed = try FeedParser().parse(Data(feed.utf8))
+        let ids = parsed.episodes.map(\.id)
+        XCTAssertEqual(ids, ["g", "g|https://example.com/2.mp3", "g|https://example.com/2.mp3#3"])
+        XCTAssertEqual(Set(ids).count, 3)
+    }
+
+    func testHTMLSnifferFindsAdvertisedFeed() {
+        let page = """
+        <!DOCTYPE html><html><head>
+        <link href="/feed.xml" type="application/rss+xml" rel="alternate" title="RSS">
+        </head><body></body></html>
+        """
+        XCTAssertTrue(HTMLSniffer.looksLikeHTML(Data(page.utf8)))
+        XCTAssertFalse(HTMLSniffer.looksLikeHTML(Data("<?xml version=\"1.0\"?><rss/>".utf8)))
+        let found = HTMLSniffer.discoverFeed(in: Data(page.utf8), relativeTo: URL(string: "https://show.example/about")!)
+        XCTAssertEqual(found?.absoluteString, "https://show.example/feed.xml")
+        XCTAssertNil(HTMLSniffer.discoverFeed(in: Data("<html><body>none</body></html>".utf8), relativeTo: URL(string: "https://x.example")!))
+    }
+
     func testSanitize() {
         XCTAssertEqual(FileNaming.sanitize("  ...hidden/name?  ", fallback: "x"), "hidden name")
         XCTAssertEqual(FileNaming.sanitize("///", fallback: "fallback"), "fallback")
