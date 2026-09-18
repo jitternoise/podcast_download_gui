@@ -27,6 +27,23 @@ struct ContentView: View {
             }
             PlayerBar()
         }
+        // Unsubscribing from anywhere (toolbar, context menu) must not leave
+        // the detail column pointing at a show that no longer exists.
+        .onChange(of: model.library.podcasts.map(\.id)) { _, ids in
+            if case .podcast(let id) = selection, !ids.contains(id) { selection = .search }
+        }
+        // "Go to Now Playing" from the player bar or the Playback menu.
+        .onChange(of: model.requestedPodcastID) { _, id in
+            guard let id else { return }
+            selection = .podcast(id)
+            model.requestedPodcastID = nil
+        }
+        // Space toggles playback whenever a text field doesn't have focus.
+        .onKeyPress(.space) {
+            guard model.player.hasItem else { return .ignored }
+            model.player.togglePlayPause()
+            return .handled
+        }
     }
 
     private var sidebar: some View {
@@ -55,7 +72,6 @@ struct ContentView: View {
                             Button("Open Folder in Finder") { model.openFolder(for: podcast) }
                             Divider()
                             Button("Unsubscribe", role: .destructive) {
-                                if selection == .podcast(podcast.id) { selection = .search }
                                 model.library.unsubscribe(podcast)
                             }
                         }
@@ -72,14 +88,20 @@ struct ContentView: View {
                     Label("Refresh All", systemImage: "arrow.clockwise")
                 }
                 .disabled(model.library.podcasts.isEmpty || !model.library.refreshing.isEmpty)
+                .help("Check every subscription for new episodes (⌘R)")
                 Spacer()
                 if !model.library.refreshing.isEmpty {
                     ProgressView().controlSize(.small)
+                } else if !model.library.refreshErrors.isEmpty {
+                    Label("\(model.library.refreshErrors.count) failed", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .help(model.library.refreshErrors.map { "\(model.library.podcast(withID: $0.key)?.title ?? $0.key): \($0.value)" }.joined(separator: "\n"))
                 } else if let last = model.library.lastFullRefresh {
                     Text("Updated \(last, style: .relative) ago")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .help("Automatic refresh: \(RefreshPolicy.label(forMinutes: model.settings.autoRefreshMinutes).lowercased())")
+                        .help("Checks for new episodes \(RefreshPolicy.pickerLabel(forMinutes: model.settings.autoRefreshMinutes))")
                 }
             }
             .padding(10)
@@ -173,34 +195,41 @@ struct PodcastSidebarRow: View {
             Spacer()
             if model.library.refreshing.contains(podcast.id) {
                 ProgressView().controlSize(.mini)
-            } else if model.library.refreshErrors[podcast.id] != nil {
+            } else if let error = model.library.refreshErrors[podcast.id] {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.yellow)
-                    .help(model.library.refreshErrors[podcast.id] ?? "")
+                    .help("Last refresh failed: \(error)")
+                    .accessibilityLabel("Last refresh failed: \(error)")
             }
         }
     }
 }
 
+/// Artwork from the shared `ImageCache`: one downsampled decode per URL,
+/// reused by every row and the Now Playing info.
 struct ArtworkView: View {
     let url: URL?
     var size: CGFloat = 48
+    @State private var image: NSImage?
 
     var body: some View {
-        AsyncImage(url: url) { phase in
-            switch phase {
-            case .success(let image):
-                image.resizable().aspectRatio(contentMode: .fill)
-            default:
-                ZStack {
-                    Rectangle().fill(.quaternary)
-                    Image(systemName: "waveform")
-                        .foregroundStyle(.secondary)
-                        .font(.system(size: size * 0.4))
-                }
+        ZStack {
+            if let image {
+                Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
+            } else {
+                Rectangle().fill(.quaternary)
+                Image(systemName: "waveform")
+                    .foregroundStyle(.secondary)
+                    .font(.system(size: size * 0.4))
             }
         }
         .frame(width: size, height: size)
         .clipShape(RoundedRectangle(cornerRadius: size * 0.12, style: .continuous))
+        .accessibilityHidden(true)
+        .task(id: url) {
+            image = nil
+            guard let url else { return }
+            image = await ImageCache.shared.image(for: url)
+        }
     }
 }

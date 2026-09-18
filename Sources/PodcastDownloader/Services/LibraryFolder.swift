@@ -17,6 +17,9 @@ struct LocalFile: Identifiable, Hashable {
     let url: URL
     let size: Int64
     let modified: Date
+    /// In iCloud Drive but not on this Mac right now ("evicted"); it must be
+    /// fetched before it can play.
+    var isEvicted = false
 }
 
 /// Disk-level operations on the master folder: scanning and relocating.
@@ -57,6 +60,17 @@ enum LibraryFolder {
         }
     }
 
+    /// Whether a file is in iCloud Drive but not currently downloaded to this Mac.
+    static func isEvicted(_ url: URL) -> Bool {
+        guard let values = try? url.resourceValues(forKeys: [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey]) else { return false }
+        return isEvicted(values)
+    }
+
+    private static func isEvicted(_ values: URLResourceValues) -> Bool {
+        guard values.isUbiquitousItem == true, let status = values.ubiquitousItemDownloadingStatus else { return false }
+        return status == .notDownloaded
+    }
+
     private static func isPermissionError(_ error: Error) -> Bool {
         let ns = error as NSError
         return ns.domain == NSCocoaErrorDomain
@@ -72,20 +86,20 @@ enum LibraryFolder {
 
         var folders: [PodcastFolder] = []
         for dir in entries where (try? dir.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
-            let files = (try? fm.contentsOfDirectory(
-                at: dir, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey, .isRegularFileKey],
-                options: [.skipsHiddenFiles]
-            )) ?? []
+            let keys: Set<URLResourceKey> = [.fileSizeKey, .contentModificationDateKey, .isRegularFileKey,
+                                             .isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey]
+            let files = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: Array(keys), options: [.skipsHiddenFiles])) ?? []
 
             let localFiles: [LocalFile] = files.compactMap { file in
                 guard isMediaFile(file),
-                      let values = try? file.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey, .isRegularFileKey]),
+                      let values = try? file.resourceValues(forKeys: keys),
                       values.isRegularFile == true else { return nil }
                 return LocalFile(
                     name: file.deletingPathExtension().lastPathComponent,
                     url: file,
                     size: Int64(values.fileSize ?? 0),
-                    modified: values.contentModificationDate ?? .distantPast
+                    modified: values.contentModificationDate ?? .distantPast,
+                    isEvicted: isEvicted(values)
                 )
             }
             .sorted { $0.modified > $1.modified }

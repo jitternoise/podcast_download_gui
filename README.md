@@ -5,8 +5,11 @@
 A native macOS app for finding podcasts, subscribing to their RSS feeds, and
 downloading episodes to a folder of your choosing.
 
-- **Search** the Apple Podcasts directory by name, host, or topic — or paste any
-  RSS feed URL directly.
+- **Search** the Apple Podcasts directory by name, host, or topic (results
+  appear as you type) — or paste an RSS feed URL, a show's web page, or an
+  Apple Podcasts link. `feed://` and `podcast://` links from Safari open here
+  too, as do links dropped onto the window. Subscriptions can be imported
+  from and exported to OPML (File menu).
 - **Subscribe** to shows; the app keeps track of their episodes and can
   automatically download new ones each time it refreshes. Feeds are refreshed
   automatically — at launch, after the Mac wakes, when the app comes to the
@@ -14,25 +17,35 @@ downloading episodes to a folder of your choosing.
   interval you choose in Settings (default: once an hour). Refresh All (⌘R)
   always checks immediately. Pasting a show's web page instead of its feed
   works too, as long as the page links to its RSS feed.
-- **Latest Episodes** — one list of the 100 newest episodes across every
-  subscription, newest first, so you can see what's new without clicking
-  through each show.
+- **Latest Episodes** — the newest episodes across every subscription, newest
+  first, so you can see what's new without clicking through each show.
+- **Episode lists** can be searched, filtered (all / downloaded / unplayed) and
+  sorted; they show what's played, what's in progress and how much is left.
+  Arrow keys move, Return plays, Delete trashes a download, Space
+  pauses/resumes. Right-click for show notes, Mark as Played, Delete Download.
 - **Download** individual episodes or an entire back catalog, with a concurrent
   download queue and per-episode progress. Downloads keep the Mac from idle-
   sleeping, survive a lost Wi-Fi connection or a lid-close by resuming where
   they stopped, and quitting warns you if any are still running.
 - **Built-in player** — double-click an episode to play it in the player bar at
-  the bottom of the window: play/pause, 10-second skip back/forward, scrubber,
-  playback speed (0.75×–2×), and it remembers where you left off in each episode.
-  Works with the keyboard media keys and Control Center's Now Playing. If an
-  episode isn't downloaded yet, it's fetched first and starts playing
-  automatically. "Open in External App" is in the right-click menu if you'd
-  rather use Music or another player.
+  the bottom of the window: play/pause, skip back/forward (5–60 s, your
+  choice), scrubber, chapters when the file has them, playback speed
+  (0.75×–2×, remembered), volume, and the AirPlay / output picker. It remembers
+  where you left off in each episode, continues with the next downloaded
+  episode of the show when one ends (optional), has a sleep timer, pauses when
+  the Mac sleeps or your headphones disconnect, and works with the keyboard
+  media keys, AirPods and Control Center's Now Playing (with artwork). Click
+  the title in the player bar (or ⌘L) to jump to the episode. If an episode
+  isn't downloaded yet, it's fetched first and starts playing automatically.
+  "Open in External App" is in the right-click menu if you'd rather use Music
+  or another player.
 - **Mini player** — the ⤡ button on the player bar (or ⇧⌘M) fades the main
   window out and shows a small always-movable player with artwork, scrubber,
-  and transport controls; pin it to keep it above other windows. ⤢ (or closing
-  the mini window) fades the full window back in exactly as you left it —
-  selection, scroll position and all.
+  and transport controls; pin it to keep it above other windows and follow you
+  across Spaces and full-screen apps. It remembers where you put it. ⤢ (or
+  closing the mini window) fades the full window back in exactly as you left
+  it — selection, scroll position and all. The Dock icon shows how many
+  downloads are running and its menu has play/pause and skip.
 - **One folder, always** — you pick a single master folder and every podcast
   gets its own sub-folder named after the show. Change the folder in Settings
   and the app moves your podcast folders there (anything else in the old
@@ -104,9 +117,12 @@ Sources/PodcastDownloader/
 
 | Action | Shortcut |
 |---|---|
-| Play / Pause | ⌥ Space (or the keyboard's play key) |
-| Back / forward 10 s | ⌥⌘← / ⌥⌘→ |
-| Stop | ⌘. |
+| Play / Pause | Space (when not typing), ⌥⌘P, or the keyboard's play key |
+| Back / forward | ⌥⌘← / ⌥⌘→ |
+| Next / previous episode | ⇧⌘→ / ⇧⌘← |
+| Go to now playing | ⌘L |
+| Stop | ⌥⌘S |
+| Play selected episode / delete its download | Return / ⌫ |
 | Mini player / full window | ⇧⌘M |
 | Refresh all subscriptions | ⌘R |
 | Settings | ⌘, |
@@ -117,5 +133,24 @@ Sources/PodcastDownloader/
 swift test
 ```
 
-`FeedParserTests` are pure unit tests. `NetworkTests` hit the real Apple search
-API and download one episode into a temp folder; they skip themselves when offline.
+Everything runs offline against temp folders, a silent player and an
+in-memory feed loader. `PlayerTests` and `WindowModeTests` need a logged-in
+GUI session (they drive a real `AVPlayer` and real windows) and skip
+themselves otherwise. `NetworkTests` hit the real Apple search API and
+download one episode; they only run when asked:
+
+```bash
+PODCAST_NETWORK_TESTS=1 swift test --filter NetworkTests
+```
+
+CI (`.github/workflows/ci.yml`) builds, runs the headless tests and packages
+the universal `.app` on every push.
+
+## Distributing to other Macs
+
+`scripts/build_app.sh` produces a universal (Apple Silicon + Intel) app with an
+ad-hoc signature, which runs on the Mac that built it. To hand it to other
+Macs without Gatekeeper refusing it, sign with a Developer ID and notarize —
+the script prints the commands. The app is not sandboxed; it reads and writes
+the folder you choose directly and keeps a bookmark to it, so an App Store
+build would need the sandbox and security-scoped bookmarks added first.

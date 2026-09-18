@@ -3,21 +3,10 @@ import SwiftUI
 struct SearchView: View {
     @Environment(AppModel.self) private var model
 
-    @State private var query = ""
-    @State private var results: [Podcast] = []
-    @State private var isSearching = false
-    @State private var searchError: String?
-
-    @State private var feedText = ""
-    @State private var isLoadingFeed = false
-    @State private var feedError: String?
-
-    @State private var path = NavigationPath()
-
-    private let service = PodcastSearchService()
-
     var body: some View {
-        NavigationStack(path: $path) {
+        @Bindable var search = model.search
+
+        NavigationStack(path: $search.path) {
             VStack(spacing: 0) {
                 header
                 Divider()
@@ -31,30 +20,32 @@ struct SearchView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        @Bindable var search = model.search
+
+        return VStack(alignment: .leading, spacing: 12) {
             HStack {
-                TextField("Search Apple Podcasts…", text: $query)
+                TextField("Search Apple Podcasts…", text: $search.query)
                     .textFieldStyle(.roundedBorder)
-                    .onSubmit { Task { await runSearch() } }
-                Button("Search") { Task { await runSearch() } }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(query.trimmingCharacters(in: .whitespaces).isEmpty || isSearching)
-                if isSearching { ProgressView().controlSize(.small) }
+                    .onSubmit { Task { await search.runSearch() } }
+                    .onChange(of: search.query) { _, _ in search.queryChanged() }
+                    .accessibilityLabel("Search Apple Podcasts")
+                if search.isSearching { ProgressView().controlSize(.small) }
             }
-            if let searchError {
-                Text(searchError).font(.callout).foregroundStyle(.red)
+            if let error = search.searchError {
+                Text(error).font(.callout).foregroundStyle(.red)
             }
 
             HStack {
-                TextField("Or paste an RSS feed URL…", text: $feedText)
+                TextField("Or paste an RSS feed, show web page, or Apple Podcasts link…", text: $search.feedText)
                     .textFieldStyle(.roundedBorder)
-                    .onSubmit { Task { await addFeed() } }
-                Button("Open Feed") { Task { await addFeed() } }
-                    .disabled(feedText.trimmingCharacters(in: .whitespaces).isEmpty || isLoadingFeed)
-                if isLoadingFeed { ProgressView().controlSize(.small) }
+                    .onSubmit { Task { await search.addFeed(library: model.library) } }
+                    .accessibilityLabel("Feed or show address")
+                Button("Open") { Task { await search.addFeed(library: model.library) } }
+                    .disabled(search.feedText.trimmingCharacters(in: .whitespaces).isEmpty || search.isLoadingFeed)
+                if search.isLoadingFeed { ProgressView().controlSize(.small) }
             }
-            if let feedError {
-                Text(feedError).font(.callout).foregroundStyle(.red)
+            if let error = search.feedError {
+                Text(error).font(.callout).foregroundStyle(.red)
             }
         }
         .padding()
@@ -62,74 +53,18 @@ struct SearchView: View {
 
     @ViewBuilder
     private var resultsList: some View {
-        if results.isEmpty {
+        if model.search.results.isEmpty {
             ContentUnavailableView(
-                isSearching ? "Searching…" : "Find a podcast",
+                model.search.isSearching ? "Searching…" : "Find a podcast",
                 systemImage: "magnifyingglass",
-                description: Text("Search by show name, host, or topic, or paste a feed URL above.")
+                description: Text("Search by show name, host, or topic — results appear as you type — or paste a feed URL above.")
             )
         } else {
-            List(results) { podcast in
+            List(model.search.results) { podcast in
                 NavigationLink(value: podcast) {
                     SearchResultRow(podcast: podcast)
                 }
             }
-        }
-    }
-
-    private func runSearch() async {
-        let term = query.trimmingCharacters(in: .whitespaces)
-        guard !term.isEmpty else { return }
-        isSearching = true
-        searchError = nil
-        defer { isSearching = false }
-        do {
-            results = try await service.search(term)
-            if results.isEmpty { searchError = "No podcasts found for “\(term)”." }
-        } catch {
-            searchError = error.localizedDescription
-        }
-    }
-
-    private func addFeed() async {
-        var text = feedText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !text.lowercased().hasPrefix("http") { text = "https://" + text }
-        guard let url = URL(string: text), url.host != nil else {
-            feedError = "That doesn't look like a valid URL."
-            return
-        }
-        isLoadingFeed = true
-        feedError = nil
-        defer { isLoadingFeed = false }
-
-        // If already subscribed, jump straight to it.
-        if let existing = model.library.podcast(withID: url.absoluteString) {
-            path.append(existing)
-            return
-        }
-
-        do {
-            let feed = try await FeedLoader.load(url)
-            // A pasted web page may have led us to its feed; subscribe to that.
-            let feedURL = feed.sourceURL ?? url
-            if let existing = model.library.podcast(withID: feedURL.absoluteString) {
-                feedText = ""
-                path.append(existing)
-                return
-            }
-            let podcast = Podcast(
-                title: feed.title.isEmpty ? feedURL.host ?? "Podcast" : feed.title,
-                author: feed.author,
-                feedURL: feedURL,
-                artworkURL: feed.artworkURL,
-                summary: feed.summary
-            )
-            let sorted = feed.episodes.sorted { ($0.publishedAt ?? .distantPast) > ($1.publishedAt ?? .distantPast) }
-            model.library.cacheEpisodes(sorted, for: podcast)
-            feedText = ""
-            path.append(podcast)
-        } catch {
-            feedError = error.localizedDescription
         }
     }
 }

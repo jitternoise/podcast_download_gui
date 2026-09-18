@@ -7,15 +7,18 @@ struct DownloadsView: View {
     private var active: [DownloadItem] { model.downloads.activeItems }
     private var failed: [DownloadItem] {
         model.downloads.finishedItems
-            .filter { $0.state != .finished }
+            .filter { if case .failed = $0.state { true } else { false } }
             .sorted { $0.createdAt > $1.createdAt }
+    }
+    private var cancelled: [DownloadItem] {
+        model.downloads.finishedItems.filter { $0.state == .cancelled }.sorted { $0.createdAt > $1.createdAt }
     }
     private var totalFiles: Int { model.onDisk.reduce(0) { $0 + $1.files.count } }
     private var totalSize: Int64 { model.onDisk.reduce(0) { $0 + $1.totalSize } }
 
     var body: some View {
         Group {
-            if active.isEmpty, failed.isEmpty, model.onDisk.isEmpty {
+            if active.isEmpty, failed.isEmpty, cancelled.isEmpty, model.onDisk.isEmpty {
                 ContentUnavailableView("Nothing downloaded yet", systemImage: "arrow.down.circle",
                                        description: Text("Episodes you download are saved to\n\(model.settings.masterDirectory.path)"))
             } else {
@@ -28,6 +31,11 @@ struct DownloadsView: View {
                     if !failed.isEmpty {
                         Section("Failed") {
                             ForEach(failed) { DownloadRow(item: $0) }
+                        }
+                    }
+                    if !cancelled.isEmpty {
+                        Section("Cancelled") {
+                            ForEach(cancelled) { DownloadRow(item: $0) }
                         }
                     }
                     ForEach(model.onDisk) { folder in
@@ -51,19 +59,18 @@ struct DownloadsView: View {
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button("Rescan", systemImage: "arrow.clockwise") { model.rescanDisk() }
+                    .help("Re-read the master folder")
                 Button("Open Master Folder", systemImage: "folder") { model.openMasterFolder() }
                 Button("Cancel All", systemImage: "xmark.circle") { model.cancelAllDownloads() }
                     .disabled(active.isEmpty)
-                Button("Clear Failed", systemImage: "trash") { model.downloads.clearFinished() }
-                    .disabled(failed.isEmpty)
+                Button("Clear Finished", systemImage: "xmark.bin") { model.downloads.clearFinished() }
+                    .disabled(failed.isEmpty && cancelled.isEmpty)
+                    .help("Remove failed and cancelled entries from this list (files on disk are untouched)")
             }
         }
         .onAppear { model.rescanDisk() }
     }
 
-    private func bytes(_ n: Int64) -> String {
-        ByteCountFormatter.string(fromByteCount: max(0, n), countStyle: .file)
-    }
 }
 
 /// A file that exists in the master folder.
@@ -74,9 +81,11 @@ struct LocalFileRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: "waveform")
+            Image(systemName: file.isEvicted ? "icloud.and.arrow.down" : "waveform")
                 .foregroundStyle(.secondary)
                 .frame(width: 20)
+                .help(file.isEvicted ? "In iCloud Drive, not downloaded to this Mac" : "")
+                .accessibilityLabel(file.isEvicted ? "In iCloud, not on this Mac" : "Audio file")
             VStack(alignment: .leading, spacing: 2) {
                 Text(file.name).font(.headline).lineLimit(1)
                 Text("\(ByteCountFormatter.string(fromByteCount: file.size, countStyle: .file)) · \(file.modified, format: .dateTime.year().month(.abbreviated).day())")
@@ -86,8 +95,10 @@ struct LocalFileRow: View {
             Spacer()
             Button("Play", systemImage: "play.circle") { model.play(file, in: folder) }
                 .labelStyle(.iconOnly).buttonStyle(.borderless)
-            Button("Show in Finder", systemImage: "magnifyingglass.circle") { model.revealInFinder(file.url) }
+                .help("Play")
+            Button("Show in Finder", systemImage: "folder") { model.revealInFinder(file.url) }
                 .labelStyle(.iconOnly).buttonStyle(.borderless)
+                .help("Show in Finder")
         }
         .padding(.vertical, 3)
         .contentShape(Rectangle())
@@ -102,7 +113,7 @@ struct LocalFileRow: View {
     }
 }
 
-/// An in-flight or failed queue item.
+/// An in-flight, failed or cancelled queue item.
 struct DownloadRow: View {
     @Environment(AppModel.self) private var model
     let item: DownloadItem
@@ -125,7 +136,7 @@ struct DownloadRow: View {
     private var statusLine: some View {
         switch item.state {
         case .queued:
-            Text("Waiting…").font(.caption).foregroundStyle(.secondary)
+            Text(item.autoRetries > 0 ? "Retrying…" : "Waiting…").font(.caption).foregroundStyle(.secondary)
         case .downloading:
             HStack(spacing: 8) {
                 if let progress = item.progress {
@@ -142,7 +153,8 @@ struct DownloadRow: View {
         case .failed(let message):
             Label(message, systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(.red).lineLimit(2)
         case .cancelled:
-            Text("Cancelled").font(.caption).foregroundStyle(.secondary)
+            Text(item.resumeData != nil ? "Cancelled — Retry continues where it stopped" : "Cancelled")
+                .font(.caption).foregroundStyle(.secondary)
         }
     }
 
@@ -161,7 +173,8 @@ struct DownloadRow: View {
         }
     }
 
-    private func bytes(_ n: Int64) -> String {
-        ByteCountFormatter.string(fromByteCount: max(0, n), countStyle: .file)
-    }
+}
+
+private func bytes(_ n: Int64) -> String {
+    ByteCountFormatter.string(fromByteCount: max(0, n), countStyle: .file)
 }

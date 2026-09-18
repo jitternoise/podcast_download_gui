@@ -20,6 +20,17 @@ enum RefreshPolicy {
         options.first { $0.minutes == minutes }?.label ?? "\(minutes) minutes"
     }
 
+    /// Reads as a sentence after "Check for new episodes": "at most every hour".
+    static func pickerLabel(forMinutes minutes: Int) -> String {
+        switch minutes {
+        case 0: return "on every launch"
+        case never: return "never (manual only)"
+        case 60: return "at most every hour"
+        case let m where m % 60 == 0: return "at most every \(m / 60) hours"
+        default: return "at most every \(minutes) minutes"
+        }
+    }
+
     /// - Parameters:
     ///   - lastFullRefresh: when all subscriptions were last refreshed, if ever.
     ///   - minimumMinutes: the user's minimum gap; `never` means don't auto-refresh.

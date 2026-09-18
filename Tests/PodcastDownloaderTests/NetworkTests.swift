@@ -1,8 +1,15 @@
 import XCTest
 @testable import PodcastDownloader
 
-/// Live network tests against real services. Skipped automatically if offline.
+/// Live network tests against real services. They download a real episode,
+/// so they only run when explicitly asked for:
+///     PODCAST_NETWORK_TESTS=1 swift test --filter NetworkTests
 final class NetworkTests: XCTestCase {
+    override func setUpWithError() throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["PODCAST_NETWORK_TESTS"] != nil,
+                          "set PODCAST_NETWORK_TESTS=1 to run the live network tests")
+    }
+
     func testSearchReturnsFeeds() async throws {
         let results: [Podcast]
         do {

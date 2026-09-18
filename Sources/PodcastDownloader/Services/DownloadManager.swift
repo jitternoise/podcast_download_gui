@@ -6,7 +6,18 @@ import Observation
 @MainActor
 @Observable
 final class DownloadManager {
-    private(set) var items: [DownloadItem] = []
+    private(set) var items: [DownloadItem] = [] {
+        didSet {
+            let count = items.filter(\.isActive).count
+            if count != lastActiveCount {
+                lastActiveCount = count
+                onActiveCountChange?(count)
+            }
+        }
+    }
+    private var lastActiveCount = 0
+    /// Called whenever the number of queued+running downloads changes (Dock badge).
+    var onActiveCountChange: ((Int) -> Void)?
 
     var maxConcurrent: Int = 3 {
         didSet { pump() }
@@ -51,12 +62,13 @@ final class DownloadManager {
 
     // MARK: Queue control
 
-    func enqueue(_ episode: Episode, from podcast: Podcast, to destination: URL) {
+    func enqueue(_ episode: Episode, from podcast: Podcast, to destination: URL, automatic: Bool = false) {
         if let existing = item(for: episode), existing.isActive { return }
         // A previous attempt at the same destination may have left resume data.
         let previous = item(for: episode)
         items.removeAll { $0.id == episode.key }
         var item = DownloadItem(id: episode.key, episode: episode, podcast: podcast, destination: destination)
+        item.isAutomatic = automatic
         if previous?.destination == destination { item.resumeData = previous?.resumeData }
         items.append(item)
         pump()
@@ -81,14 +93,6 @@ final class DownloadManager {
 
     func clearFinished() {
         items.removeAll { !$0.isActive }
-    }
-
-    func retry(_ id: String) {
-        guard let idx = items.firstIndex(where: { $0.id == id }), !items[idx].isActive else { return }
-        items[idx].state = .queued
-        items[idx].bytesReceived = 0
-        items[idx].bytesExpected = -1
-        pump()
     }
 
     /// Start queued downloads until the concurrency limit is reached.
@@ -151,6 +155,11 @@ final class DownloadManager {
         } else {
             var request = URLRequest(url: item.episode.enclosureURL)
             request.setValue("PodcastDownloader/1.0 (macOS)", forHTTPHeaderField: "User-Agent")
+            if item.isAutomatic {
+                // Nobody asked for this right now: stay off hotspots and Low Data Mode.
+                request.allowsExpensiveNetworkAccess = false
+                request.allowsConstrainedNetworkAccess = false
+            }
             task = transport.download(request, id: item.id, destination: item.destination, expected: expected(for: item))
         }
         tasks[item.id] = task
@@ -163,8 +172,15 @@ final class DownloadManager {
 
     // MARK: Callbacks
 
+    private var lastProgressUpdate: [String: Date] = [:]
+
+    /// Progress arrives per network chunk; publishing every one re-renders
+    /// every row. A few updates per second is plenty for a progress bar.
     private func progress(id: String, received: Int64, expected: Int64) {
         guard let idx = items.firstIndex(where: { $0.id == id }), items[idx].state == .downloading else { return }
+        let now = Date()
+        if let last = lastProgressUpdate[id], now.timeIntervalSince(last) < 0.25, received < expected { return }
+        lastProgressUpdate[id] = now
         items[idx].bytesReceived = received
         items[idx].bytesExpected = expected
     }
@@ -200,10 +216,11 @@ final class DownloadManager {
     }
 }
 
-/// URLSession delegate wrapper. Lives off the main actor; forwards events via closures.
-final class DownloadTransport: NSObject, URLSessionDownloadDelegate {
-    typealias ProgressHandler = (String, Int64, Int64) -> Void
-    typealias CompletionHandler = (String, Result<URL, Failure>) -> Void
+/// URLSession delegate wrapper. Lives off the main actor; forwards events via
+/// closures. Its only mutable state is `pending`, guarded by `lock`.
+final class DownloadTransport: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+    typealias ProgressHandler = @Sendable (String, Int64, Int64) -> Void
+    typealias CompletionHandler = @Sendable (String, Result<URL, Failure>) -> Void
 
     /// What the feed said about the enclosure, used to spot bodies that aren't audio.
     struct Expectation {
@@ -211,7 +228,7 @@ final class DownloadTransport: NSObject, URLSessionDownloadDelegate {
         var length: Int64?
     }
 
-    struct Failure: Error {
+    struct Failure: Error, @unchecked Sendable {
         let error: Error
         /// Present when URLSession can continue the transfer later.
         let resumeData: Data?
@@ -244,7 +261,7 @@ final class DownloadTransport: NSObject, URLSessionDownloadDelegate {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 60
         config.timeoutIntervalForResource = 6 * 60 * 60
-        config.httpMaximumConnectionsPerHost = 4
+        config.httpMaximumConnectionsPerHost = 10      // matches the top of the concurrency setting
         // After sleep or a network change, wait for connectivity instead of
         // failing the whole queue with "offline".
         config.waitsForConnectivity = true

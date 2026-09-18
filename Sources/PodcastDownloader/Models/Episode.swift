@@ -18,30 +18,57 @@ struct Episode: Identifiable, Codable, Hashable {
     /// `id` alone is only unique within one feed.
     var key: String { podcastID.map { $0 + "|" + id } ?? id }
 
-    /// File extension inferred from the enclosure URL, falling back to the
-    /// MIME type and finally to mp3.
+    /// Newest first; undated episodes sink to the bottom.
+    static func newestFirst(_ a: Episode, _ b: Episode) -> Bool {
+        (a.publishedAt ?? .distantPast) > (b.publishedAt ?? .distantPast)
+    }
+
+    /// File extension inferred from the enclosure URL when it is a media
+    /// extension, else from the MIME type, else mp3. A URL ending in .php or
+    /// .aspx is a script that serves audio, not the audio's type.
     var fileExtension: String {
         let ext = enclosureURL.pathExtension.lowercased()
-        if !ext.isEmpty, ext.count <= 4 { return ext }
+        if Self.mediaExtensions.contains(ext) { return ext }
         switch mimeType?.lowercased() {
         case "audio/mp4", "audio/x-m4a", "audio/m4a": return "m4a"
         case "audio/aac": return "aac"
-        case "audio/ogg": return "ogg"
+        case "audio/ogg", "audio/opus": return "ogg"
+        case "audio/wav", "audio/x-wav": return "wav"
+        case "audio/flac": return "flac"
         case "video/mp4": return "mp4"
         default: return "mp3"
         }
     }
 
-    /// `2024-03-09 - Episode Title.mp3`
+    static let mediaExtensions: Set<String> = ["mp3", "m4a", "aac", "ogg", "opus", "wav", "flac", "mp4", "m4b"]
+
+    /// `2024-03-09 - Episode Title.mp3`. The date is the UTC publish date so
+    /// the same episode gets the same name on every Mac.
     var fileName: String {
         var name = FileNaming.sanitize(title, fallback: id)
         if let publishedAt {
-            let df = DateFormatter()
-            df.locale = Locale(identifier: "en_US_POSIX")
-            df.dateFormat = "yyyy-MM-dd"
-            name = "\(df.string(from: publishedAt)) - \(name)"
+            name = "\(Self.dayFormatter.string(from: publishedAt)) - \(name)"
         }
         return "\(name).\(fileExtension)"
+    }
+
+    private static let dayFormatter: DateFormatter = {
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "en_US_POSIX")
+        df.timeZone = TimeZone(secondsFromGMT: 0)
+        df.dateFormat = "yyyy-MM-dd"
+        return df
+    }()
+
+    /// `<itunes:duration>` in seconds: it is either plain seconds ("3600") or
+    /// HH:MM:SS / MM:SS. Nil when absent or unparseable.
+    var durationSeconds: Int? {
+        guard let raw = duration?.trimmingCharacters(in: .whitespaces), !raw.isEmpty else { return nil }
+        if let seconds = Int(raw) { return seconds }
+        if let seconds = Double(raw) { return Int(seconds) }
+        let parts = raw.split(separator: ":").compactMap { Int($0) }
+        guard !parts.isEmpty, parts.count == raw.split(separator: ":").count else { return nil }
+        return parts.reduce(0) { $0 * 60 + $1 }
     }
 }
 
@@ -53,19 +80,26 @@ enum FileNaming {
     ///
     /// The fallback is cleaned the same way: it is usually the feed's `<guid>`,
     /// which is attacker-controlled and must never be able to carry a path.
+    /// APFS/HFS+ limit file names to 255 UTF-16 code units, not characters;
+    /// leave room for the date prefix, a " (n)" suffix and the extension.
+    static let maxUTF16Length = 200
+
     static func sanitize(_ raw: String, fallback: String) -> String {
         var cleaned = clean(raw)
         if cleaned.isEmpty { cleaned = clean(fallback) }
         if cleaned.isEmpty { cleaned = "Untitled" }
-        if cleaned.count > 120 { cleaned = String(cleaned.prefix(120)).trimmingCharacters(in: .whitespaces) }
-        return cleaned
+        if cleaned.count > 120 { cleaned = String(cleaned.prefix(120)) }
+        while cleaned.utf16.count > maxUTF16Length { cleaned.removeLast() }
+        return cleaned.trimmingCharacters(in: .whitespaces)
     }
+
+    private static let whitespaceRuns = try! NSRegularExpression(pattern: "\\s+")
 
     private static func clean(_ raw: String) -> String {
         var cleaned = raw.components(separatedBy: illegal)
             .filter { $0 != "." && $0 != ".." }      // path-only pieces mean nothing as text
             .joined(separator: " ")
-        cleaned = cleaned.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        cleaned = whitespaceRuns.stringByReplacingMatches(in: cleaned, range: NSRange(cleaned.startIndex..., in: cleaned), withTemplate: " ")
         // Finder treats a leading dot as hidden.
         while let first = cleaned.first, first == "." || first.isWhitespace { cleaned.removeFirst() }
         return cleaned.trimmingCharacters(in: .whitespaces)

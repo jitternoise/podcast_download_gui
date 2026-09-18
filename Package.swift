@@ -7,7 +7,10 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "PodcastDownloader",
-            path: "Sources/PodcastDownloader"
+            path: "Sources/PodcastDownloader",
+            // Surface data-race risks as warnings now (Swift 5 mode), so the
+            // move to Swift 6 language mode is a checklist, not a surprise.
+            swiftSettings: [.enableUpcomingFeature("StrictConcurrency")]
         ),
         .testTarget(
             name: "PodcastDownloaderTests",

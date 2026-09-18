@@ -128,7 +128,7 @@ final class FeedParserTests: XCTestCase {
                               enclosureLength: nil, mimeType: nil, duration: nil)
         XCTAssertFalse(hostile.fileName.contains("/"))
         XCTAssertFalse(hostile.fileName.hasPrefix("."))
-        XCTAssertEqual(hostile.fileName, "zshrc.sh")
+        XCTAssertEqual(hostile.fileName, "zshrc.mp3", ".sh is not a media extension, so the MIME/default type wins")
     }
 
     func testUniqueURLAppendsCounterBeforeExtension() {
@@ -161,5 +161,85 @@ final class FeedParserTests: XCTestCase {
 
     func testHTMLStripper() {
         XCTAssertEqual(HTMLStripper.strip("<p>Hello &amp; <a href='x'>world</a></p>"), "Hello & world")
+        XCTAssertEqual(HTMLStripper.strip("It&#8217;s &#x2019;fine&#x2019; &rsquo; &nbsp;ok &bogus;"), "It’s ’fine’ ’  ok &bogus;")
+    }
+
+    func testTwoDigitYearsAndZonelessDatesParse() throws {
+        let twoDigit = try XCTUnwrap(RSSDate.parse("Mon, 08 Sep 26 10:00:00 +0000"))
+        var cal = Calendar(identifier: .gregorian); cal.timeZone = TimeZone(secondsFromGMT: 0)!
+        XCTAssertEqual(cal.component(.year, from: twoDigit), 2026)
+        XCTAssertNotNil(RSSDate.parse("Mon, 08 Sep 2026 10:00:00"), "no zone → assumed UTC")
+        XCTAssertNotNil(RSSDate.parse("Tue, 8 Sep 2026 10:00:00 +0000"), "single-digit day")
+    }
+
+    func testDurationAndExtensionNormalisation() {
+        func ep(url: String, mime: String? = nil, duration: String? = nil) -> Episode {
+            Episode(id: "x", title: "t", summary: "", publishedAt: nil, enclosureURL: URL(string: url)!,
+                    enclosureLength: nil, mimeType: mime, duration: duration)
+        }
+        XCTAssertEqual(ep(url: "https://x/a.php", mime: "audio/mpeg").fileExtension, "mp3", "a script isn't a file type")
+        XCTAssertEqual(ep(url: "https://x/a.html", mime: "audio/x-m4a").fileExtension, "m4a")
+        XCTAssertEqual(ep(url: "https://x/a.M4B").fileExtension, "m4b")
+        XCTAssertEqual(ep(url: "https://x/a", duration: "3725").durationSeconds, 3725)
+        XCTAssertEqual(ep(url: "https://x/a", duration: "01:02:03").durationSeconds, 3723)
+        XCTAssertEqual(ep(url: "https://x/a", duration: "45:10").durationSeconds, 2710)
+        XCTAssertNil(ep(url: "https://x/a", duration: "n/a").durationSeconds)
+        XCTAssertEqual(TimeText.duration(3723), "1h 2m")
+        XCTAssertEqual(TimeText.duration(2710), "45 min")
+        XCTAssertEqual(TimeText.duration(3600), "1h")
+    }
+
+    func testFileNamesUseTheUTCDate() {
+        // 23:30 UTC on Sep 8 is already Sep 9 east of UTC+1; the file name must not depend on the Mac's zone.
+        let date = ISO8601DateFormatter().date(from: "2026-09-08T23:30:00Z")!
+        let ep = Episode(id: "x", title: "Late", summary: "", publishedAt: date, enclosureURL: URL(string: "https://x/a.mp3")!,
+                         enclosureLength: nil, mimeType: nil, duration: nil)
+        XCTAssertEqual(ep.fileName, "2026-09-08 - Late.mp3")
+    }
+
+    func testFileNameLengthIsClampedInUTF16Units() {
+        let emoji = String(repeating: "👩‍👩‍👧‍👦", count: 40)   // 40 characters, 440 UTF-16 units
+        let name = FileNaming.sanitize(emoji, fallback: "x")
+        XCTAssertLessThanOrEqual(name.utf16.count, FileNaming.maxUTF16Length)
+        XCTAssertFalse(name.isEmpty)
+    }
+
+    func testSpeedLabels() {
+        XCTAssertEqual(TimeText.rate(1.0), "1×")
+        XCTAssertEqual(TimeText.rate(2.0), "2×")
+        XCTAssertEqual(TimeText.rate(1.25), "1.25×")
+        XCTAssertEqual(TimeText.rate(1.75), "1.75×")
+        XCTAssertEqual(TimeText.rate(0.75), "0.75×")
+        XCTAssertEqual(TimeText.rate(1.5), "1.5×")
+    }
+
+    func testApplePodcastsLinksAreRecognised() {
+        XCTAssertEqual(PodcastSearchService.applePodcastsID(in: URL(string: "https://podcasts.apple.com/us/podcast/planet-money/id290783428")!), "290783428")
+        XCTAssertEqual(PodcastSearchService.applePodcastsID(in: URL(string: "https://podcasts.apple.com/gb/podcast/id123?i=456")!), "123")
+        XCTAssertNil(PodcastSearchService.applePodcastsID(in: URL(string: "https://example.com/id123")!))
+        XCTAssertEqual(PodcastDownloaderApp.webURL(from: URL(string: "feed://example.com/rss")!).absoluteString, "https://example.com/rss")
+        XCTAssertEqual(PodcastDownloaderApp.webURL(from: URL(string: "feed:https://example.com/rss")!).absoluteString, "https://example.com/rss")
+        XCTAssertEqual(PodcastDownloaderApp.webURL(from: URL(string: "https://example.com/rss")!).absoluteString, "https://example.com/rss")
+    }
+
+    func testOPMLRoundTrip() throws {
+        let podcasts = [
+            Podcast(title: "A & B", author: "", feedURL: URL(string: "https://example.com/a?x=1&y=2")!),
+            Podcast(title: "Quotes \"here\"", author: "", feedURL: URL(string: "https://example.com/b")!),
+        ]
+        let data = OPML.export(podcasts)
+        let entries = try OPML.parse(data)
+        XCTAssertEqual(entries.map(\.title), ["A & B", "Quotes \"here\""])
+        XCTAssertEqual(entries.map(\.feedURL), podcasts.map(\.feedURL))
+
+        let foreign = """
+        <opml version="1.0"><body><outline text="Folder">
+          <outline type="rss" text="Show" xmlUrl="https://example.com/show.rss"/>
+          <outline type="rss" text="Dup" xmlUrl="https://example.com/show.rss"/>
+          <outline type="rss" text="Local" xmlUrl="file:///etc/passwd"/>
+        </outline></body></opml>
+        """
+        XCTAssertEqual(try OPML.parse(Data(foreign.utf8)).map(\.feedURL.absoluteString), ["https://example.com/show.rss"])
+        XCTAssertThrowsError(try OPML.parse(Data("<html/>".utf8)))
     }
 }

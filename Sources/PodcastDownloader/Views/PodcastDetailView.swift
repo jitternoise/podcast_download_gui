@@ -1,14 +1,48 @@
+import AppKit
 import SwiftUI
 
 struct PodcastDetailView: View {
     @Environment(AppModel.self) private var model
     let podcast: Podcast
 
+    enum Filter: String, CaseIterable, Identifiable {
+        case all = "All", downloaded = "Downloaded", unplayed = "Unplayed"
+        var id: String { rawValue }
+    }
+    enum Sort: String, CaseIterable, Identifiable {
+        case newest = "Newest First", oldest = "Oldest First"
+        var id: String { rawValue }
+    }
+
+    @State private var selectedID: Episode.ID?
+    @State private var searchText = ""
+    @State private var filter: Filter = .all
+    @State private var sort: Sort = .newest
+    @State private var downloadedCount = 0
+    @State private var confirmDownloadAll = false
+    @State private var confirmUnsubscribe = false
+    @State private var notesFor: Episode?
+
     /// The library's copy when subscribed (it carries auto-download and refreshed metadata).
     private var current: Podcast { model.library.podcast(withID: podcast.id) ?? podcast }
     private var isSubscribed: Bool { model.library.isSubscribed(podcast) }
     private var episodes: [Episode] { model.library.episodes(for: podcast) }
     private var isRefreshing: Bool { model.library.refreshing.contains(podcast.id) }
+
+    private var visibleEpisodes: [Episode] {
+        var list = episodes
+        let needle = searchText.trimmingCharacters(in: .whitespaces)
+        if !needle.isEmpty {
+            list = list.filter { $0.title.localizedCaseInsensitiveContains(needle) || $0.summary.localizedCaseInsensitiveContains(needle) }
+        }
+        switch filter {
+        case .all: break
+        case .downloaded: list = list.filter { model.localFile(for: $0, in: current) != nil }
+        case .unplayed: list = list.filter { !model.library.isPlayed($0) }
+        }
+        if sort == .oldest { list.reverse() }
+        return list
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -17,10 +51,36 @@ struct PodcastDetailView: View {
             episodeList
         }
         .navigationTitle(current.title)
+        .searchable(text: $searchText, placement: .toolbar, prompt: "Search episodes")
         .toolbar { toolbarContent }
         .task(id: podcast.id) {
-            if episodes.isEmpty { await model.refresh(current) }
+            // Detached from this view's lifetime: navigating away must not
+            // cancel the fetch (and record "cancelled" as a feed error).
+            if episodes.isEmpty { Task { await model.refresh(current) } }
         }
+        .onAppear { recount() }
+        .onChange(of: model.onDisk) { _, _ in recount() }
+        .onChange(of: model.library.downloaded.count) { _, _ in recount() }
+        .onChange(of: episodes.count) { _, _ in recount() }
+        .confirmationDialog(downloadAllTitle, isPresented: $confirmDownloadAll, titleVisibility: .visible) {
+            Button("Download \(missingEpisodes.count) Episodes") { model.downloadAll(current) }
+        } message: {
+            Text(downloadAllMessage)
+        }
+        .confirmationDialog("Unsubscribe from “\(current.title)”?", isPresented: $confirmUnsubscribe, titleVisibility: .visible) {
+            Button("Unsubscribe", role: .destructive) { model.library.unsubscribe(podcast) }
+        } message: {
+            Text("Downloaded files are kept. The show stops refreshing and disappears from the sidebar.")
+        }
+        .sheet(item: $notesFor) { episode in
+            EpisodeNotesView(episode: episode, podcast: current)
+        }
+    }
+
+    /// `downloadedCount` stats every episode; do it when something changed,
+    /// not on every body evaluation.
+    private func recount() {
+        downloadedCount = model.downloadedCount(for: current)
     }
 
     // MARK: Header
@@ -55,9 +115,18 @@ struct PodcastDetailView: View {
                 .padding(.top, 2)
 
                 if isSubscribed {
-                    Toggle("Automatically download new episodes", isOn: autoDownloadBinding)
-                        .toggleStyle(.checkbox)
-                        .padding(.top, 4)
+                    HStack(spacing: 16) {
+                        Toggle("Automatically download new episodes", isOn: autoDownloadBinding)
+                            .toggleStyle(.checkbox)
+                        if current.autoDownload {
+                            Stepper(value: keepLatestBinding, in: 0...100) {
+                                Text(current.keepLatest == 0 ? "Keep all" : "Keep latest \(current.keepLatest)")
+                                    .font(.callout)
+                            }
+                            .help("Older auto-downloads are moved to the Trash once this many are on disk. 0 keeps everything.")
+                        }
+                    }
+                    .padding(.top, 4)
                 }
 
                 if let error = model.library.refreshErrors[podcast.id] {
@@ -83,8 +152,16 @@ struct PodcastDetailView: View {
         )
     }
 
-    private var downloadedCount: Int {
-        episodes.filter { model.localFile(for: $0, in: current) != nil }.count
+    private var keepLatestBinding: Binding<Int> {
+        Binding(
+            get: { current.keepLatest },
+            set: { newValue in
+                var p = current
+                p.keepLatest = newValue
+                model.library.update(p)
+                model.applyKeepLatest(for: p)
+            }
+        )
     }
 
     // MARK: Episodes
@@ -94,25 +171,76 @@ struct PodcastDetailView: View {
         if episodes.isEmpty {
             if isRefreshing {
                 ContentUnavailableView("Loading episodes…", systemImage: "antenna.radiowaves.left.and.right")
+            } else if let error = model.library.refreshErrors[podcast.id] {
+                ContentUnavailableView("Couldn't load episodes", systemImage: "exclamationmark.triangle",
+                                       description: Text(error))
             } else {
                 ContentUnavailableView("No episodes", systemImage: "tray",
                                        description: Text("The feed didn't return any downloadable episodes."))
             }
+        } else if visibleEpisodes.isEmpty {
+            ContentUnavailableView.search(text: searchText.isEmpty ? filter.rawValue : searchText)
         } else {
-            List(episodes) { episode in
-                EpisodeRow(episode: episode, podcast: current)
+            List(visibleEpisodes, selection: $selectedID) { episode in
+                EpisodeRow(episode: episode, podcast: current, onShowNotes: { notesFor = episode })
+                    .tag(episode.id)
             }
+            .onKeyPress(.return) { playSelected(); return .handled }
+            .onKeyPress(.delete) { deleteSelected(); return .handled }
+            .onKeyPress(.space) { model.player.togglePlayPause(); return .handled }
         }
+    }
+
+    private var selectedEpisode: Episode? {
+        selectedID.flatMap { id in episodes.first { $0.id == id } }
+    }
+
+    private func playSelected() {
+        guard let episode = selectedEpisode else { return }
+        model.downloadAndPlay(episode, from: current)
+    }
+
+    private func deleteSelected() {
+        guard let episode = selectedEpisode else { return }
+        model.deleteDownload(of: episode, in: current)
     }
 
     // MARK: Toolbar
 
+    private var missingEpisodes: [Episode] {
+        episodes.filter { model.localFile(for: $0, in: current) == nil && !model.downloads.isQueuedOrActive($0) }
+    }
+
+    private var downloadAllTitle: String {
+        "Download all \(missingEpisodes.count) episodes of “\(current.title)”?"
+    }
+
+    private var downloadAllMessage: String {
+        let bytes = missingEpisodes.compactMap(\.enclosureLength).reduce(0, +)
+        let unknown = missingEpisodes.filter { ($0.enclosureLength ?? 0) <= 0 }.count
+        var text = bytes > 0 ? "About \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))" : "Size unknown"
+        if bytes > 0, unknown > 0 { text += " (plus \(unknown) of unknown size)" }
+        return text + ". Files go to \(model.settings.folder(for: current).path)."
+    }
+
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItemGroup(placement: .primaryAction) {
+            Menu {
+                Picker("Show", selection: $filter) {
+                    ForEach(Filter.allCases) { Text($0.rawValue).tag($0) }
+                }
+                Picker("Sort", selection: $sort) {
+                    ForEach(Sort.allCases) { Text($0.rawValue).tag($0) }
+                }
+            } label: {
+                Label("Filter", systemImage: filter == .all && sort == .newest ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill")
+            }
+            .help("Filter and sort episodes")
+
             if isSubscribed {
                 Button {
-                    model.library.unsubscribe(podcast)
+                    confirmUnsubscribe = true
                 } label: {
                     Label("Unsubscribe", systemImage: "minus.circle")
                 }
@@ -135,12 +263,12 @@ struct PodcastDetailView: View {
             .help("Reload the feed")
 
             Button {
-                model.downloadAll(current)
+                confirmDownloadAll = true
             } label: {
                 Label("Download All", systemImage: "arrow.down.to.line")
             }
-            .disabled(episodes.isEmpty)
-            .help("Download every episode that isn't already on disk")
+            .disabled(missingEpisodes.isEmpty)
+            .help(missingEpisodes.isEmpty ? "Every episode is already on disk" : "Download every episode that isn't already on disk")
 
             Button {
                 model.openFolder(for: current)
@@ -158,9 +286,13 @@ struct EpisodeRow: View {
     let podcast: Podcast
     /// Show the podcast's artwork and name — used in cross-podcast lists.
     var showPodcast = false
+    var onShowNotes: (() -> Void)?
 
     private var localFile: URL? { model.localFile(for: episode, in: podcast) }
     private var downloadItem: DownloadItem? { model.downloads.item(for: episode) }
+    private var isPlayed: Bool { model.library.isPlayed(episode) }
+    private var position: Double { model.library.playbackPosition(for: episode) }
+    private var isLoaded: Bool { model.isCurrentlyLoaded(episode) }
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -168,27 +300,19 @@ struct EpisodeRow: View {
                 ArtworkView(url: podcast.artworkURL, size: 44)
             }
             VStack(alignment: .leading, spacing: 3) {
-                Text(episode.title).font(.headline).lineLimit(2)
                 HStack(spacing: 6) {
-                    if showPodcast {
-                        Text(podcast.title).lineLimit(1)
-                        Text("·")
+                    if !isPlayed, localFile != nil, position == 0 {
+                        Circle().fill(.tint).frame(width: 7, height: 7)
+                            .accessibilityLabel("Unplayed")
                     }
-                    if let date = episode.publishedAt {
-                        Text(date, format: .dateTime.year().month(.abbreviated).day())
-                    }
-                    if let duration = episode.duration {
-                        Text("·"); Text(formatDuration(duration))
-                    }
-                    if let length = episode.enclosureLength, length > 0 {
-                        Text("·"); Text(ByteCountFormatter.string(fromByteCount: length, countStyle: .file))
-                    }
+                    Text(episode.title).font(.headline).lineLimit(2)
+                        .foregroundStyle(isPlayed ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
                 }
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                metaLine
                 if !episode.summary.isEmpty {
                     Text(episode.summary).font(.callout).foregroundStyle(.secondary).lineLimit(2)
                 }
+                progressLine
             }
             Spacer(minLength: 8)
             trailing
@@ -199,22 +323,71 @@ struct EpisodeRow: View {
             model.downloadAndPlay(episode, from: podcast)
         }
         .help(localFile == nil ? "Double-click to download and play" : "Double-click to play")
-        .contextMenu {
-            if let localFile {
-                Button("Play") { model.play(episode, from: podcast) }
-                Button("Open in External App") { model.openExternally(localFile) }
-                Button("Show in Finder") { model.revealInFinder(localFile) }
-                Divider()
-                Button("Download Again") { model.download(episode, from: podcast) }
-            } else {
-                Button("Download and Play") { model.downloadAndPlay(episode, from: podcast) }
-                Button("Download") { model.download(episode, from: podcast) }
-                    .disabled(model.downloads.isQueuedOrActive(episode))
+        .contextMenu { contextMenu }
+    }
+
+    private var metaLine: some View {
+        HStack(spacing: 6) {
+            if showPodcast {
+                Text(podcast.title).lineLimit(1)
+                Text("·")
             }
-            Button("Copy Audio URL") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(episode.enclosureURL.absoluteString, forType: .string)
+            if let date = episode.publishedAt {
+                Text(date, format: .dateTime.year().month(.abbreviated).day())
             }
+            if let seconds = episode.durationSeconds {
+                Text("·"); Text(TimeText.duration(seconds))
+            }
+            if let length = episode.enclosureLength, length > 0 {
+                Text("·"); Text(ByteCountFormatter.string(fromByteCount: length, countStyle: .file))
+            }
+            if isPlayed {
+                Text("·"); Label("Played", systemImage: "checkmark").labelStyle(.titleAndIcon)
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+    }
+
+    @ViewBuilder
+    private var progressLine: some View {
+        let total = episode.durationSeconds.map(Double.init) ?? (isLoaded ? model.player.duration : 0)
+        if position > 0, total > 0 {
+            HStack(spacing: 8) {
+                ProgressView(value: min(position, total), total: total)
+                    .frame(width: 120)
+                    .controlSize(.small)
+                Text("\(TimeText.duration(Int(total - position))) left")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            .padding(.top, 2)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("\(TimeText.duration(Int(total - position))) remaining")
+        }
+    }
+
+    @ViewBuilder
+    private var contextMenu: some View {
+        if let localFile {
+            Button("Play") { model.play(episode, from: podcast) }
+            Button("Open in External App") { model.openExternally(localFile) }
+            Button("Show in Finder") { model.revealInFinder(localFile) }
+            Divider()
+            Button("Download Again") { model.download(episode, from: podcast) }
+            Button("Delete Download", role: .destructive) { model.deleteDownload(of: episode, in: podcast) }
+        } else {
+            Button("Download and Play") { model.downloadAndPlay(episode, from: podcast) }
+            Button("Download") { model.download(episode, from: podcast) }
+                .disabled(model.downloads.isQueuedOrActive(episode))
+        }
+        Divider()
+        Button(isPlayed ? "Mark as Unplayed" : "Mark as Played") { model.library.setPlayed(episode, !isPlayed) }
+        if let onShowNotes {
+            Button("Show Notes…") { onShowNotes() }
+        }
+        Button("Copy Audio URL") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(episode.enclosureURL.absoluteString, forType: .string)
         }
     }
 
@@ -222,27 +395,24 @@ struct EpisodeRow: View {
     private var trailing: some View {
         if let localFile {
             HStack(spacing: 6) {
-                if model.isCurrentlyLoaded(episode) {
+                if isLoaded {
                     Image(systemName: model.player.isPlaying ? "speaker.wave.2.fill" : "speaker.fill")
                         .foregroundStyle(.tint)
                         .help("Now playing")
+                        .accessibilityLabel("Now playing")
                 } else {
                     Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                        .accessibilityLabel("Downloaded")
                 }
-                Button {
-                    model.play(episode, from: podcast)
-                } label: {
-                    Image(systemName: "play.circle")
-                }
-                .buttonStyle(.borderless)
-                .help("Play")
-                Button {
-                    model.revealInFinder(localFile)
-                } label: {
-                    Image(systemName: "magnifyingglass.circle")
-                }
-                .buttonStyle(.borderless)
-                .help("Show in Finder")
+                Button("Play", systemImage: "play.circle") { model.play(episode, from: podcast) }
+                    .labelStyle(.iconOnly).buttonStyle(.borderless)
+                    .help("Play")
+                Button("Show in Finder", systemImage: "folder") { model.revealInFinder(localFile) }
+                    .labelStyle(.iconOnly).buttonStyle(.borderless)
+                    .help("Show in Finder")
+                Button("Delete Download", systemImage: "trash") { model.deleteDownload(of: episode, in: podcast) }
+                    .labelStyle(.iconOnly).buttonStyle(.borderless)
+                    .help("Move the downloaded file to the Trash")
             }
             .frame(width: 130, alignment: .trailing)
         } else if let item = downloadItem, item.isActive {
@@ -257,18 +427,15 @@ struct EpisodeRow: View {
                             .font(.caption2).foregroundStyle(.secondary)
                     }
                 }
-                Button {
-                    model.cancelDownload(item.id)
-                } label: {
-                    Image(systemName: "xmark.circle")
-                }
-                .buttonStyle(.borderless)
-                .help("Cancel")
+                Button("Cancel", systemImage: "xmark.circle") { model.cancelDownload(item.id) }
+                    .labelStyle(.iconOnly).buttonStyle(.borderless)
+                    .help("Cancel")
             }
             .frame(width: 130, alignment: .trailing)
         } else if let item = downloadItem, case .failed(let message) = item.state {
             HStack(spacing: 6) {
                 Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.yellow).help(message)
+                    .accessibilityLabel("Failed: \(message)")
                 Button("Retry") { model.download(episode, from: podcast) }
                     .buttonStyle(.bordered).controlSize(.small)
             }
@@ -284,13 +451,52 @@ struct EpisodeRow: View {
             .frame(width: 130, alignment: .trailing)
         }
     }
+}
 
-    /// iTunes duration is either seconds ("3600") or HH:MM:SS / MM:SS.
-    private func formatDuration(_ raw: String) -> String {
-        if let seconds = Int(raw) {
-            let h = seconds / 3600, m = (seconds % 3600) / 60
-            return h > 0 ? "\(h)h \(m)m" : "\(m) min"
+/// Full show notes for one episode.
+struct EpisodeNotesView: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    let episode: Episode
+    let podcast: Podcast
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                ArtworkView(url: podcast.artworkURL, size: 64)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(episode.title).font(.title3.bold())
+                    Text(podcast.title).foregroundStyle(.secondary)
+                    HStack(spacing: 6) {
+                        if let date = episode.publishedAt {
+                            Text(date, format: .dateTime.year().month(.abbreviated).day())
+                        }
+                        if let seconds = episode.durationSeconds { Text("·"); Text(TimeText.duration(seconds)) }
+                    }
+                    .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            Divider()
+            ScrollView {
+                Text(episode.summary.isEmpty ? "This episode has no show notes." : episode.summary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            HStack {
+                Button("Copy Audio URL") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(episode.enclosureURL.absoluteString, forType: .string)
+                }
+                Spacer()
+                Button(model.localFile(for: episode, in: podcast) == nil ? "Download and Play" : "Play") {
+                    model.downloadAndPlay(episode, from: podcast)
+                    dismiss()
+                }
+                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
         }
-        return raw
+        .padding(20)
+        .frame(width: 520, height: 460)
     }
 }

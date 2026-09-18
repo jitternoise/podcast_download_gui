@@ -69,9 +69,9 @@ final class LibraryTests: XCTestCase {
         XCTAssertEqual(lib.episodeID(downloadedTo: "A/shared.mp3"), epA.key)
     }
 
-    func testMigratesV1GuidKeysToCompositeKeys() throws {
+    func testMigratesV1GuidKeysToCompositeKeys() async throws {
         let v1 = """
-        {"podcasts":[{"title":"A","author":"","feedURL":"https://example.com/A","autoDownload":false}],
+        {"podcasts":[{"title":"A","author":"","feedURL":"https://example.com/A","autoDownload":true}],
          "episodes":{"https://example.com/A":[{"id":"ep1","title":"One","summary":"","enclosureURL":"https://example.com/1.mp3"}]},
          "downloaded":{"ep1":"A/One.mp3"},
          "lastRefreshed":{},
@@ -80,22 +80,26 @@ final class LibraryTests: XCTestCase {
         try Data(v1.utf8).write(to: file)
         let lib = Library(fileURL: file)
         XCTAssertNil(lib.loadError)
+        XCTAssertEqual(lib.podcasts.first?.autoDownload, true)
+        XCTAssertEqual(lib.podcasts.first?.keepLatest, 0, "field added later defaults instead of failing the load")
         let ep = lib.episodes(for: podcast("A"))[0]
         XCTAssertEqual(ep.podcastID, "https://example.com/A")
         XCTAssertEqual(lib.downloadedRelativePath(for: ep), "A/One.mp3")
         XCTAssertEqual(lib.playbackPosition(for: ep), 30)
         XCTAssertNil(lib.downloaded["ep1"], "old key is gone")
+        await lib.flush()
         let written = try String(contentsOf: file, encoding: .utf8)
-        XCTAssertTrue(written.contains("\"version\" : 2"))
+        XCTAssertTrue(written.contains("\"version\":2"))
     }
 
-    func testUnreadableFileIsKeptAsideNotOverwritten() throws {
+    func testUnreadableFileIsKeptAsideNotOverwritten() async throws {
         try Data("{ this is not json".utf8).write(to: file)
         let lib = Library(fileURL: file)
         XCTAssertNotNil(lib.loadError)
         XCTAssertTrue(lib.podcasts.isEmpty)
 
         lib.subscribe(podcast("A"))   // first mutation writes a fresh file
+        await lib.flush()
 
         let dir = file.deletingLastPathComponent()
         let kept = try FileManager.default.contentsOfDirectory(atPath: dir.path)
@@ -135,6 +139,45 @@ final class LibraryTests: XCTestCase {
         XCTAssertEqual(current?.autoDownload, true, "the edit survives the refresh")
         XCTAssertEqual(current?.title, "A (renamed by feed)", "feed metadata still applied")
         XCTAssertEqual(lib.episodes(for: a).first?.podcastID, a.id)
+    }
+
+    func testSavesAreCoalescedAndFlushable() async throws {
+        let lib = Library(fileURL: file)
+        lib.saveDelay = .seconds(10)
+        lib.subscribe(podcast("A"))
+        lib.subscribe(podcast("B"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path), "nothing written yet")
+        lib.flushNow()
+        let written = try String(contentsOf: file, encoding: .utf8)
+        XCTAssertTrue(written.contains("example.com") && written.contains("\"version\":2"))
+
+        lib.subscribe(podcast("C"))
+        await lib.flush()
+        XCTAssertEqual(Library(fileURL: file).podcasts.count, 3)
+    }
+
+    func testPlayedStateRoundTrips() async {
+        let lib = Library(fileURL: file)
+        let a = podcast("A")
+        lib.subscribe(a)
+        lib.cacheEpisodes([episode("e1", daysAgo: 1)], for: a)
+        let ep = lib.episodes(for: a)[0]
+        lib.setPlaybackPosition(120, for: ep)
+        lib.setPlayed(ep, true)
+        XCTAssertEqual(lib.playbackPosition(for: ep), 0, "marking played clears the resume point")
+        await lib.flush()
+        let reloaded = Library(fileURL: file)
+        XCTAssertTrue(reloaded.isPlayed(reloaded.episodes(for: a)[0]))
+    }
+
+    func testUnsubscribeKeepsEpisodesForTheSession() {
+        let lib = Library(fileURL: file)
+        let a = podcast("A")
+        lib.subscribe(a)
+        lib.cacheEpisodes([episode("e1", daysAgo: 1)], for: a)
+        lib.unsubscribe(a)
+        XCTAssertEqual(lib.episodes(for: a).count, 1, "the detail view can still show the show")
+        XCTAssertTrue(lib.latestEpisodes().isEmpty, "…but it's no longer part of Latest")
     }
 
     func testSameEpisodeIDInTwoPodcastsStaysDistinct() {

@@ -9,12 +9,32 @@ struct RootView: View {
 
     var body: some View {
         ContentView()
-            .frame(minWidth: 900, minHeight: 560)
+            // Small enough for window tiling on a 13" MacBook; the player bar
+            // switches to its compact layout below ~900 pt.
+            .frame(minWidth: 760, minHeight: 480)
             .onAppear { showLoadError = model.library.loadError != nil }
             .alert("Subscriptions couldn't be loaded", isPresented: $showLoadError) {
                 Button("OK") {}
             } message: {
                 Text(model.library.loadError ?? "")
+            }
+            .alert("Podcast Downloader", isPresented: Binding(
+                get: { model.alertMessage != nil },
+                set: { if !$0 { model.alertMessage = nil } }
+            )) {
+                Button("OK") {}
+            } message: {
+                Text(model.alertMessage ?? "")
+            }
+            .onDrop(of: [.url, .plainText], isTargeted: nil) { providers in
+                // Drop a feed link (or a page/Apple Podcasts link) anywhere.
+                for provider in providers {
+                    _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                        guard let url else { return }
+                        Task { @MainActor in await model.search.open(url, library: model.library) }
+                    }
+                }
+                return true
             }
             .background(WindowAccessor { window in
                 model.windowMode.mainWindow = window

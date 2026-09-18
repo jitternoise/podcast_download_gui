@@ -24,7 +24,7 @@ struct SettingsView: View {
                         }
                     }
                 }
-                Text("All downloads live in this one folder, in a sub-folder per podcast. Choosing a different folder moves everything already downloaded there.")
+                Text("All downloads live in this one folder, in a sub-folder per podcast. Choosing a different folder moves your podcast folders there; anything else in the old folder is left alone.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -42,9 +42,9 @@ struct SettingsView: View {
             }
 
             Section("Refreshing") {
-                Picker("Check for new episodes at most every", selection: $settings.autoRefreshMinutes) {
+                Picker("Check for new episodes", selection: $settings.autoRefreshMinutes) {
                     ForEach(RefreshPolicy.options, id: \.minutes) { option in
-                        Text(option.label).tag(option.minutes)
+                        Text(RefreshPolicy.pickerLabel(forMinutes: option.minutes)).tag(option.minutes)
                     }
                 }
                 Text("Automatic checks happen at launch, after the Mac wakes, when the app comes to the front, and periodically while it stays open. Refresh All (⌘R) always checks immediately.")
@@ -62,10 +62,26 @@ struct SettingsView: View {
                 Stepper("Simultaneous downloads: \(settings.maxConcurrentDownloads)",
                         value: $settings.maxConcurrentDownloads, in: 1...10)
                     .onChange(of: settings.maxConcurrentDownloads) { _, _ in model.applySettings() }
+                Toggle("Delete an episode's file after it has been played to the end", isOn: $settings.deleteAfterPlayed)
+                Text("Automatic downloads stay off personal hotspots and Low Data Mode networks; downloads you start yourself always go ahead.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Playback") {
+                Picker("Skip buttons jump", selection: $settings.skipInterval) {
+                    ForEach(AppSettings.skipIntervalOptions, id: \.self) { Text("\($0) seconds").tag($0) }
+                }
+                .onChange(of: settings.skipInterval) { _, _ in model.applySettings() }
+                Toggle("Continue with the next downloaded episode when one ends", isOn: $settings.continuousPlay)
+                LabeledContent("Playback speed") {
+                    Text("\(TimeText.rate(settings.playbackRate)) — remembered from the player bar")
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .formStyle(.grouped)
-        .frame(width: 520)
+        .frame(width: 560)
         .fixedSize(horizontal: false, vertical: true)
     }
 

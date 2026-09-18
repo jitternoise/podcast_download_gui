@@ -23,14 +23,13 @@ final class PlayerTests: XCTestCase {
     }
 
     func testLoadsDurationPlaysAndSkips() async throws {
-        let player = Player()
+        let player = makePlayer()
         player.play(episode, from: podcast, file: file)
 
         try await waitUntil { player.duration > 0 && player.isPlaying }
         XCTAssertEqual(player.duration, 30, accuracy: 0.1)
 
-        try await Task.sleep(for: .seconds(1.2))
-        XCTAssertGreaterThan(player.currentTime, 0.5, "time should advance while playing")
+        try await waitUntil { player.currentTime > 0.5 }   // time advances while playing
 
         player.skipForward()
         XCTAssertEqual(player.currentTime, 10 + 1, accuracy: 1.5)
@@ -47,7 +46,7 @@ final class PlayerTests: XCTestCase {
     }
 
     func testResumesFromStartPositionAndReportsPosition() async throws {
-        let player = Player()
+        let player = makePlayer()
         var reported: Double?
         player.onPositionUpdate = { _, seconds in reported = seconds }
 
@@ -63,16 +62,21 @@ final class PlayerTests: XCTestCase {
     }
 
     func testRateChangeKeepsPlaying() async throws {
-        let player = Player()
+        let player = makePlayer()
+        var reportedRate: Float?
+        player.onRateChange = { reportedRate = $0 }
         player.play(episode, from: podcast, file: file)
-        try await waitUntil { player.isPlaying }
+        try await waitUntil { player.isPlaying && player.currentTime > 0.2 }
         player.rate = 2.0
-        try await Task.sleep(for: .seconds(0.3))     // let the rate change settle
+        XCTAssertEqual(reportedRate, 2.0, "the owner is told so the speed can be remembered")
+
+        // At 2× the player should cover 2 s of audio in clearly under 2 s of
+        // wall-clock time; poll rather than sleep a fixed amount.
         let start = player.currentTime
-        try await Task.sleep(for: .seconds(1.5))
+        let began = Date()
+        try await waitUntil(timeout: 4) { player.currentTime - start >= 2 }
         XCTAssertTrue(player.isPlaying)
-        let advanced = player.currentTime - start
-        XCTAssertGreaterThan(advanced, 1.5 * 1.3, "2x should cover clearly more audio than wall-clock time")
+        XCTAssertLessThan(Date().timeIntervalSince(began), 1.7, "2 s of audio at 2× takes about 1 s")
         player.stop()
         XCTAssertFalse(player.hasItem)
     }
@@ -82,7 +86,7 @@ final class PlayerTests: XCTestCase {
         try Self.makeWAV(seconds: 1, to: short)
         defer { try? FileManager.default.removeItem(at: short) }
 
-        let player = Player()
+        let player = makePlayer()
         var reported: [Double] = []
         var finished = false
         player.onPositionUpdate = { _, seconds in reported.append(seconds) }
@@ -111,7 +115,7 @@ final class PlayerTests: XCTestCase {
         let other = Episode(id: "ep2", title: "Five", summary: "", publishedAt: nil, enclosureURL: short,
                             enclosureLength: nil, mimeType: "audio/wav", duration: nil)
 
-        let player = Player()
+        let player = makePlayer()
         player.play(episode, from: podcast, file: file, startAt: 12)   // 30 s file, resume at 12
         player.play(other, from: podcast, file: short)                  // before the first load finishes
         try await waitUntil { player.isPlaying }
@@ -128,7 +132,7 @@ final class PlayerTests: XCTestCase {
         try Data("<html><body>hotlinking not allowed</body></html>".utf8).write(to: bogus)
         defer { try? FileManager.default.removeItem(at: bogus) }
 
-        let player = Player()
+        let player = makePlayer()
         player.play(episode, from: podcast, file: bogus)
         try await waitUntil { player.error != nil }
 
@@ -141,6 +145,13 @@ final class PlayerTests: XCTestCase {
     }
 
     // MARK: Helpers
+
+    /// Silent, and not wired to the Mac's Now Playing / media keys.
+    private func makePlayer() -> Player {
+        let player = Player(controlsNowPlaying: false)
+        player.volume = 0
+        return player
+    }
 
     private func waitUntil(timeout: Double = 5, _ condition: @escaping () -> Bool) async throws {
         let deadline = Date().addingTimeInterval(timeout)

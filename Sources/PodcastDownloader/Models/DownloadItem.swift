@@ -13,6 +13,9 @@ struct DownloadItem: Identifiable, Hashable {
     let episode: Episode
     let podcast: Podcast
     let destination: URL
+    /// Started by auto-download rather than the user; such transfers stay off
+    /// personal hotspots and Low Data Mode networks.
+    var isAutomatic = false
     var state: State = .queued
     var bytesReceived: Int64 = 0
     var bytesExpected: Int64 = -1

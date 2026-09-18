@@ -7,11 +7,19 @@ import Observation
 @MainActor
 @Observable
 final class AppModel {
-    let settings = AppSettings()
-    let library = Library()
-    let downloads = DownloadManager()
-    let player = Player()
+    let settings: AppSettings
+    let library: Library
+    let downloads: DownloadManager
+    let player: Player
     let windowMode = WindowMode()
+    let search = SearchState()
+
+    /// Something the user needs to see that isn't tied to one view (e.g. a
+    /// trash or import failure). RootView shows it as an alert.
+    var alertMessage: String?
+
+    /// Set by "jump to now playing"; ContentView selects this podcast and clears it.
+    var requestedPodcastID: String?
 
     /// What's actually in the master folder right now (see `rescanDisk`).
     private(set) var onDisk: [PodcastFolder] = []
@@ -32,7 +40,19 @@ final class AppModel {
     /// Downloads requested while the library was being moved; started afterwards.
     private var deferredDownloads: [(Episode, Podcast)] = []
 
-    init() {
+    /// - Parameters: injectable for tests; the defaults are the real app stores.
+    init(settings: AppSettings? = nil, library: Library? = nil,
+         downloads: DownloadManager? = nil, player: Player? = nil,
+         observeSystem: Bool = true) {
+        let settings = settings ?? AppSettings()
+        let library = library ?? Library()
+        let downloads = downloads ?? DownloadManager()
+        let player = player ?? Player()
+        self.settings = settings
+        self.library = library
+        self.downloads = downloads
+        self.player = player
+
         downloads.maxConcurrent = settings.maxConcurrentDownloads
         library.migrateDownloadPaths(masterDirectory: settings.masterDirectory)
         downloads.setFinishedHandler { [weak self] episode, url in
@@ -41,22 +61,78 @@ final class AppModel {
             rescanDisk()
             if playWhenFinished.remove(episode.key) != nil,
                let podcast = downloads.item(for: episode)?.podcast {
-                play(episode, from: podcast)
+                // The user asked for this one specifically — but if they've
+                // started something else in the meantime, don't cut it off.
+                if !player.isPlaying || player.episode?.key == episode.key {
+                    play(episode, from: podcast)
+                }
             }
+            if let podcast = downloads.item(for: episode)?.podcast {
+                applyKeepLatest(for: podcast)
+            }
+        }
+        downloads.onActiveCountChange = { count in
+            NSApp?.dockTile.badgeLabel = count > 0 ? String(count) : nil
         }
         player.onPositionUpdate = { [weak self] episode, seconds in
             self?.library.setPlaybackPosition(seconds, for: episode)
         }
         player.onFinished = { [weak self] episode in
+            guard let self else { return }
             // Finished episodes start from the beginning next time.
-            self?.library.setPlaybackPosition(0, for: episode)
+            library.setPlaybackPosition(0, for: episode)
+            library.setPlayed(episode, true)
+            if settings.deleteAfterPlayed, let podcast = player.podcast, let file = localFile(for: episode, in: podcast) {
+                trash(file: file, of: episode)
+            }
+            if settings.continuousPlay { playNext(after: episode) }
+        }
+        player.skipInterval = Double(settings.skipInterval)
+        player.rate = settings.playbackRate
+        player.onRateChange = { [weak self] rate in self?.settings.playbackRate = rate }
+        player.artworkProvider = { url in await ImageCache.shared.image(for: url) }
+        player.onNextTrack = { [weak self] in
+            guard let self, let episode = player.episode else { return }
+            playNext(after: episode)
+        }
+        player.onPreviousTrack = { [weak self] in
+            guard let self, let episode = player.episode else { return }
+            if player.currentTime > 3 { player.seek(to: 0) } else { playPrevious(before: episode) }
         }
         rescanDisk()
-        startPeriodicRefresh()
+        if observeSystem {
+            startPeriodicRefresh()
+            observeSleep()
+        }
     }
 
     func applySettings() {
         downloads.maxConcurrent = settings.maxConcurrentDownloads
+        player.skipInterval = Double(settings.skipInterval)
+    }
+
+    private var sleepObserver: NSObjectProtocol?
+    private let routeMonitor = AudioRouteMonitor()
+
+    /// Pause when the Mac sleeps so audio doesn't burst out of the speakers on
+    /// wake, and when headphones or AirPods disconnect so it doesn't switch to
+    /// the built-in speakers mid-episode.
+    private func observeSleep() {
+        sleepObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.willSleepNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.player.isPlaying else { return }
+                self.player.pause()
+            }
+        }
+        routeMonitor.onChange = { [weak self] nowBuiltIn in
+            Task { @MainActor in
+                guard let self, nowBuiltIn, self.player.isPlaying else { return }
+                self.player.pause()
+            }
+        }
+        routeMonitor.start()
     }
 
     /// True while quitting would interrupt something the user cares about.
@@ -100,14 +176,20 @@ final class AppModel {
         return path.hasPrefix(prefix) ? String(path.dropFirst(prefix.count)) : url.lastPathComponent
     }
 
+    private var scanGeneration = 0
+
     /// Re-reads the master folder on a background thread and updates `onDisk`
-    /// and `folderProblem`.
+    /// and `folderProblem`. A scan that finishes after a newer one started is
+    /// discarded, so a stale snapshot can't overwrite a fresh one.
     func rescanDisk() {
         let master = settings.masterDirectory
+        scanGeneration += 1
+        let generation = scanGeneration
         Task.detached(priority: .utility) {
             let problem = LibraryFolder.check(master)
             let folders = problem == nil ? LibraryFolder.scan(master) : []
             await MainActor.run {
+                guard generation == self.scanGeneration else { return }
                 self.onDisk = folders
                 self.folderProblem = problem
                 // The folder exists now (created by a download, or the drive is
@@ -132,12 +214,34 @@ final class AppModel {
 
     /// Moves a downloaded file to the Trash.
     func trash(_ file: LocalFile) {
+        trash(file: file.url, of: episode(matching: file.url)?.episode)
+    }
+
+    /// Moves an episode's download to the Trash (the episode stays in the list).
+    func deleteDownload(of episode: Episode, in podcast: Podcast) {
+        guard let file = localFile(for: episode, in: podcast) else { return }
+        if player.episode?.key == episode.key { player.stop() }
+        trash(file: file, of: episode)
+    }
+
+    private func trash(file: URL, of episode: Episode?) {
         do {
-            try FileManager.default.trashItem(at: file.url, resultingItemURL: nil)
+            try FileManager.default.trashItem(at: file, resultingItemURL: nil)
+            if let episode { library.forgetDownload(episode) }
         } catch {
-            moveError = error.localizedDescription
+            alertMessage = "Couldn't move \"\(file.lastPathComponent)\" to the Trash: \(error.localizedDescription)"
         }
         rescanDisk()
+    }
+
+    /// With "keep the latest N" set, trash the oldest downloads beyond N.
+    /// Only ever touches files the app downloaded itself.
+    func applyKeepLatest(for podcast: Podcast) {
+        guard let current = library.podcast(withID: podcast.id), current.autoDownload, current.keepLatest > 0 else { return }
+        let downloaded = library.episodes(for: current).filter { localFile(for: $0, in: current) != nil }   // newest first
+        for episode in downloaded.dropFirst(current.keepLatest) where player.episode?.key != episode.key {
+            if library.downloadedRelativePath(for: episode) != nil { deleteDownload(of: episode, in: current) }
+        }
     }
 
     // MARK: Master folder
@@ -192,7 +296,7 @@ final class AppModel {
 
     // MARK: Downloads
 
-    func download(_ episode: Episode, from podcast: Podcast) {
+    func download(_ episode: Episode, from podcast: Podcast, automatic: Bool = false) {
         // Mid-move, the master folder is about to change: hold the request so
         // the file isn't written into the folder being abandoned.
         if moveStatus != nil {
@@ -207,7 +311,12 @@ final class AppModel {
             NSLog("Refusing to download outside the master folder: \(destination.path)")
             return
         }
-        downloads.enqueue(episode, from: podcast, to: destination)
+        downloads.enqueue(episode, from: podcast, to: destination, automatic: automatic)
+    }
+
+    /// How many of this show's episodes are on disk (for confirmations and the header).
+    func downloadedCount(for podcast: Podcast) -> Int {
+        library.episodes(for: podcast).filter { localFile(for: $0, in: podcast) != nil }.count
     }
 
     /// Double-click behaviour: play immediately if the file exists, otherwise
@@ -233,17 +342,73 @@ final class AppModel {
     /// Plays a file found on disk (Downloads tab). Matches it back to a known
     /// episode when possible so the resume position is shared.
     func play(_ file: LocalFile, in folder: PodcastFolder) {
-        let podcast = library.podcasts.first { $0.folderName == folder.name }
-            ?? Podcast(title: folder.name, author: "", feedURL: folder.url, artworkURL: nil)
-        let episode = podcast.id == folder.url.absoluteString ? nil
-            : library.episodes(for: podcast).first { localFile(for: $0, in: podcast) == file.url }
-        let resolved = episode ?? Episode(
-            id: file.url.path, title: file.name, summary: "", publishedAt: file.modified,
-            enclosureURL: file.url, enclosureLength: file.size, mimeType: nil, duration: nil,
-            podcastID: podcast.id
-        )
+        if file.isEvicted {
+            // In iCloud but not on this Mac: ask for it and tell the user.
+            try? FileManager.default.startDownloadingUbiquitousItem(at: file.url)
+            alertMessage = "\"\(file.name)\" is in iCloud Drive but not downloaded to this Mac yet. It's being fetched now — try again in a moment."
+            return
+        }
+        let resolved: Episode
+        let podcast: Podcast
+        if let match = episode(matching: file.url) {
+            (resolved, podcast) = (match.episode, match.podcast)
+        } else {
+            // Not one of ours (or from a show since unsubscribed): key by the
+            // master-relative path so the position survives a library move.
+            podcast = Podcast(title: folder.name, author: "", feedURL: folder.url, artworkURL: nil)
+            resolved = Episode(
+                id: relativePath(of: file.url), title: file.name, summary: "", publishedAt: file.modified,
+                enclosureURL: file.url, enclosureLength: file.size, mimeType: nil, duration: nil,
+                podcastID: "file"
+            )
+        }
         let saved = library.playbackPosition(for: resolved)
         player.play(resolved, from: podcast, file: file.url, startAt: saved > 5 ? saved : 0)
+    }
+
+    /// The subscribed episode that was downloaded to `url`, found through the
+    /// recorded download path (so a show that was renamed still matches).
+    private func episode(matching url: URL) -> EpisodeRef? {
+        let rel = relativePath(of: url)
+        guard let key = library.episodeID(downloadedTo: rel) else { return nil }
+        for podcast in library.podcasts {
+            if let episode = library.episodes(for: podcast).first(where: { $0.key == key }) {
+                return EpisodeRef(episode: episode, podcast: podcast)
+            }
+        }
+        return nil
+    }
+
+    // MARK: Continuous play
+
+    /// The next newer downloaded episode of the same show, if any.
+    func playNext(after episode: Episode) {
+        guard let (next, podcast) = neighbour(of: episode, offset: -1) else { return }
+        play(next, from: podcast)
+    }
+
+    func playPrevious(before episode: Episode) {
+        guard let (previous, podcast) = neighbour(of: episode, offset: 1) else { player.seek(to: 0); return }
+        play(previous, from: podcast)
+    }
+
+    /// Episodes are stored newest first, so offset -1 is the next newer one.
+    private func neighbour(of episode: Episode, offset: Int) -> (Episode, Podcast)? {
+        guard let podcastID = episode.podcastID, let podcast = library.podcast(withID: podcastID) else { return nil }
+        let list = library.episodes(for: podcast)
+        guard let idx = list.firstIndex(where: { $0.key == episode.key }) else { return nil }
+        var i = idx + offset
+        while list.indices.contains(i) {
+            if localFile(for: list[i], in: podcast) != nil { return (list[i], podcast) }
+            i += offset
+        }
+        return nil
+    }
+
+    /// Asks ContentView to show the podcast of whatever is playing.
+    func revealNowPlaying() {
+        guard let id = player.episode?.podcastID, library.podcast(withID: id) != nil else { return }
+        requestedPodcastID = id
     }
 
     func isCurrentlyLoaded(_ episode: Episode) -> Bool {
@@ -283,7 +448,7 @@ final class AppModel {
         guard folderProblem == nil,
               let current = library.podcast(withID: podcast.id), current.autoDownload else { return succeeded }
         for episode in newEpisodes where localFile(for: episode, in: current) == nil {
-            download(episode, from: current)
+            download(episode, from: current, automatic: true)
         }
         return succeeded
     }
@@ -291,12 +456,12 @@ final class AppModel {
     /// Manual "refresh everything" — always runs.
     func refreshAll() async {
         guard !library.podcasts.isEmpty else { return }
-        let anySucceeded = await withTaskGroup(of: Bool.self) { group in
-            for podcast in library.podcasts {
-                group.addTask { await self.refresh(podcast) }
-            }
-            return await group.contains(true)
+        // Fan out on the main actor (each refresh awaits its own network call).
+        let tasks = library.podcasts.map { podcast in
+            Task { @MainActor in await self.refresh(podcast) }
         }
+        var anySucceeded = false
+        for task in tasks where await task.value { anySucceeded = true }
         // Offline launches must not count as "checked": the next automatic
         // refresh should try again rather than wait out the whole interval.
         if anySucceeded { library.markFullRefresh() }

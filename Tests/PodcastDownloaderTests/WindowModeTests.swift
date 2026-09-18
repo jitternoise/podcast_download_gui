@@ -4,6 +4,12 @@ import XCTest
 
 @MainActor
 final class WindowModeTests: XCTestCase {
+    override func setUpWithError() throws {
+        // Real windows need a window server; on a headless runner skip cleanly
+        // instead of crashing on a nil screen.
+        try XCTSkipIf(NSScreen.main == nil, "no window server session")
+    }
+
     private func makeMain() -> NSWindow {
         let w = NSWindow(contentRect: NSRect(x: 200, y: 300, width: 1000, height: 700),
                          styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -58,11 +64,38 @@ final class WindowModeTests: XCTestCase {
         settle()
 
         XCTAssertFalse(mode.isMini)
-        XCTAssertNil(mode.miniWindow)
         XCTAssertTrue(main.isVisible)
         XCTAssertEqual(main.alphaValue, 1)
         XCTAssertEqual(main.frame, original)
-        XCTAssertEqual(mini?.isVisible, false, "mini window was closed")
+        XCTAssertEqual(mini?.isVisible, false, "mini window is hidden")
+        XCTAssertTrue(mode.miniWindow === mini, "…but kept, so its position and content survive the next collapse")
+    }
+
+    func testMiniWindowRemembersWhereItWasLeft() {
+        let main = makeMain()
+        let mode = makeMode(for: main)
+        mode.collapse(); settle()
+        let moved = NSPoint(x: 640, y: 420)
+        mode.miniWindow?.setFrameOrigin(moved)
+        mode.expand(); settle()
+
+        mode.collapse(); settle()
+        let origin = try! XCTUnwrap(mode.miniWindow?.frame.origin)
+        XCTAssertEqual(origin.x, moved.x, accuracy: 1)
+        XCTAssertEqual(origin.y, moved.y, accuracy: 1)
+        mode.expand(); settle()
+    }
+
+    func testPinnedMiniWindowFollowsAcrossSpaces() {
+        let main = makeMain()
+        let mode = makeMode(for: main)
+        mode.collapse(); settle()
+        mode.keepOnTop = true
+        XCTAssertTrue(mode.miniWindow?.collectionBehavior.contains(.canJoinAllSpaces) == true)
+        XCTAssertTrue(mode.miniWindow?.collectionBehavior.contains(.fullScreenAuxiliary) == true)
+        mode.keepOnTop = false
+        XCTAssertFalse(mode.miniWindow?.collectionBehavior.contains(.canJoinAllSpaces) == true)
+        mode.expand(); settle()
     }
 
     func testClosingMiniWindowExpands() {
@@ -74,7 +107,7 @@ final class WindowModeTests: XCTestCase {
         settle()
 
         XCTAssertFalse(mode.isMini)
-        XCTAssertNil(mode.miniWindow)
+        XCTAssertEqual(mode.miniWindow?.isVisible, false)
         XCTAssertTrue(main.isVisible)
     }
 
@@ -90,7 +123,6 @@ final class WindowModeTests: XCTestCase {
 
         XCTAssertTrue(main.isVisible, "main window is back synchronously")
         XCTAssertFalse(mode.isMini)
-        XCTAssertNil(mode.miniWindow)
         settle()
         XCTAssertTrue(main.isVisible)
         XCTAssertEqual(main.alphaValue, 1)
@@ -108,7 +140,6 @@ final class WindowModeTests: XCTestCase {
         XCTAssertFalse(mode.isMini)
         XCTAssertTrue(main.isVisible, "stale collapse completion must not hide the main window")
         XCTAssertEqual(main.alphaValue, 1)
-        XCTAssertNil(mode.miniWindow)
         XCTAssertEqual(mini?.isVisible, false)
     }
 
@@ -127,9 +158,9 @@ final class WindowModeTests: XCTestCase {
         XCTAssertFalse(main.isVisible)
         XCTAssertEqual(main.alphaValue, 1, "hidden main is reset to opaque for the next expand")
         XCTAssertNotNil(second)
-        XCTAssertTrue(second !== first)
+        XCTAssertTrue(second === first, "one mini window, reused")
         XCTAssertEqual(second?.isVisible, true)
-        XCTAssertEqual(first?.isVisible, false, "the abandoned mini window was closed")
+        XCTAssertEqual(second?.alphaValue, 1)
         mode.expand(); settle()
     }
 

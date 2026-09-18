@@ -25,11 +25,17 @@ final class Library {
         var lastRefreshed: [String: Date]
         var playbackPositions: [String: Double]?
         var lastFullRefresh: Date?
+        var played: [String]?
     }
     private static let currentVersion = 2
 
-    private(set) var podcasts: [Podcast] = []
-    private(set) var episodes: [String: [Episode]] = [:]     // podcast id -> episodes, newest first
+    private(set) var podcasts: [Podcast] = [] {
+        didSet { latestCache = nil }
+    }
+    private(set) var episodes: [String: [Episode]] = [:] {  // podcast id -> episodes, newest first
+        didSet { latestCache = nil }
+    }
+    private var latestCache: [EpisodeRef]?
     private(set) var downloaded: [String: String] = [:] {   // episode key -> path relative to master folder
         didSet { downloadedOwners = Dictionary(downloaded.map { ($1, $0) }, uniquingKeysWith: { a, _ in a }) }
     }
@@ -37,6 +43,7 @@ final class Library {
     private(set) var lastRefreshed: [String: Date] = [:]     // podcast id -> date
     private(set) var playbackPositions: [String: Double] = [:] // episode key -> seconds listened to
     private(set) var lastFullRefresh: Date?                    // when every subscription was last refreshed together
+    private(set) var played: Set<String> = []                  // episode keys played to the end (or marked)
     private(set) var refreshing: Set<String> = []
     var refreshErrors: [String: String] = [:]                // podcast id -> last error
     /// Set when library.json existed but couldn't be read; the file was kept aside.
@@ -47,6 +54,12 @@ final class Library {
 
     private let fileURL: URL
     private var didBackUpThisSession = false
+    /// Pending write, coalesced so a burst of mutations (Refresh All, a
+    /// playback tick) costs one encode on a background thread, not many on
+    /// the main actor.
+    private var saveTask: Task<Void, Never>?
+    /// How long mutations are coalesced before hitting the disk.
+    var saveDelay: Duration = .milliseconds(500)
 
     /// - Parameter fileURL: where to persist; defaults to Application Support. Tests pass a temp file.
     init(fileURL: URL? = nil) {
@@ -76,9 +89,11 @@ final class Library {
     }
 
     /// The newest episodes across every subscription, newest first.
-    /// Episodes without a publish date sort last.
+    /// Episodes without a publish date sort last. Sorted once per change,
+    /// not once per view update.
     func latestEpisodes(limit: Int = 100) -> [EpisodeRef] {
-        podcasts
+        if let latestCache { return Array(latestCache.prefix(limit)) }
+        let all = podcasts
             .flatMap { podcast in episodes(for: podcast).map { EpisodeRef(episode: $0, podcast: podcast) } }
             .sorted { a, b in
                 switch (a.episode.publishedAt, b.episode.publishedAt) {
@@ -88,9 +103,12 @@ final class Library {
                 case (nil, nil): return a.episode.title < b.episode.title
                 }
             }
-            .prefix(limit)
-            .map { $0 }
+        latestCache = all
+        return Array(all.prefix(limit))
     }
+
+    /// Every episode across subscriptions; use `latestEpisodes` for the top of the list.
+    var totalEpisodeCount: Int { podcasts.reduce(0) { $0 + episodes(for: $1).count } }
 
     /// Path relative to the master folder where this episode was saved, if known.
     func downloadedRelativePath(for episode: Episode) -> String? {
@@ -113,7 +131,8 @@ final class Library {
 
     func unsubscribe(_ podcast: Podcast) {
         podcasts.removeAll { $0.id == podcast.id }
-        episodes[podcast.id] = nil
+        // The episode cache stays for the session so the detail view keeps
+        // showing the show (and re-subscribing is instant); it is not persisted.
         lastRefreshed[podcast.id] = nil
         refreshErrors[podcast.id] = nil
         save()
@@ -146,6 +165,18 @@ final class Library {
 
     func forgetDownload(_ episode: Episode) {
         downloaded[episode.key] = nil
+        save()
+    }
+
+    func isPlayed(_ episode: Episode) -> Bool { played.contains(episode.key) }
+
+    func setPlayed(_ episode: Episode, _ value: Bool) {
+        if value {
+            played.insert(episode.key)
+            playbackPositions[episode.key] = nil
+        } else {
+            played.remove(episode.key)
+        }
         save()
     }
 
@@ -186,7 +217,7 @@ final class Library {
         do {
             let feed = try await loadFeed(podcast.feedURL)
             let sorted = Self.stamp(
-                feed.episodes.sorted { ($0.publishedAt ?? .distantPast) > ($1.publishedAt ?? .distantPast) },
+                feed.episodes.sorted(by: Episode.newestFirst),
                 with: podcast.id
             )
             let previousIDs = Set((episodes[podcast.id] ?? []).map(\.id))
@@ -210,6 +241,10 @@ final class Library {
                 save()
             }
             return newEpisodes
+        } catch is CancellationError {
+            return []                       // navigated away; not a feed problem
+        } catch let error as URLError where error.code == .cancelled {
+            return []
         } catch {
             refreshErrors[podcast.id] = error.localizedDescription
             return []
@@ -242,6 +277,7 @@ final class Library {
         lastRefreshed = snap.lastRefreshed
         playbackPositions = snap.playbackPositions ?? [:]
         lastFullRefresh = snap.lastFullRefresh
+        played = Set(snap.played ?? [])
         if (snap.version ?? 1) < 2 { migrateToCompositeKeys() }
     }
 
@@ -263,23 +299,64 @@ final class Library {
         save()
     }
 
+    /// Schedules a write. Encoding and I/O happen off the main actor after a
+    /// short delay so bursts collapse into one write; `flush()` forces it.
     private func save() {
-        let snap = Snapshot(
+        saveTask?.cancel()
+        saveTask = Task { [saveDelay] in
+            try? await Task.sleep(for: saveDelay)
+            guard !Task.isCancelled else { return }
+            await write()
+        }
+    }
+
+    /// Writes any pending changes now. Call before the process exits.
+    func flush() async {
+        guard saveTask != nil else { return }
+        saveTask?.cancel()
+        saveTask = nil
+        await write()
+    }
+
+    /// Synchronous variant for app termination, where nothing can await.
+    func flushNow() {
+        guard saveTask != nil else { return }
+        saveTask?.cancel()
+        saveTask = nil
+        let snap = snapshot()
+        let url = fileURL
+        backUpOncePerSession()
+        Self.write(snap, to: url)
+    }
+
+    private func write() async {
+        let snap = snapshot()
+        let url = fileURL
+        backUpOncePerSession()
+        await Task.detached(priority: .utility) { Self.write(snap, to: url) }.value
+        saveTask = nil
+    }
+
+    private func snapshot() -> Snapshot {
+        Snapshot(
             version: Self.currentVersion,
             podcasts: podcasts,
             episodes: episodes.filter { key, _ in podcasts.contains { $0.id == key } },
             downloaded: downloaded,
             lastRefreshed: lastRefreshed,
             playbackPositions: playbackPositions,
-            lastFullRefresh: lastFullRefresh
+            lastFullRefresh: lastFullRefresh,
+            played: Array(played).sorted()
         )
+    }
+
+    private nonisolated static func write(_ snap: Snapshot, to url: URL) {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.outputFormatting = [.sortedKeys]
         do {
-            backUpOncePerSession()
             let data = try encoder.encode(snap)
-            try data.write(to: fileURL, options: .atomic)
+            try data.write(to: url, options: .atomic)
         } catch {
             NSLog("Failed to save library: \(error)")
         }

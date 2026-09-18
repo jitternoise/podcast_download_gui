@@ -28,6 +28,38 @@
     <string>public.app-category.music</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <!-- feed:// podcast:// pcast:// links from Safari and other apps open in the Search tab. -->
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>Podcast feed</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>feed</string>
+                <string>podcast</string>
+                <string>pcast</string>
+                <string>itms-pcast</string>
+            </array>
+        </dict>
+    </array>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>OPML subscription list</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.xml</string>
+            </array>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>opml</string>
+            </array>
+        </dict>
+    </array>
     <key>NSHumanReadableCopyright</key>
     <string>Copyright © 2026 jitternoise</string>
     <!-- Shown in the macOS permission prompt if the user keeps podcasts in a protected folder. -->

@@ -18,6 +18,9 @@ struct FeedError: LocalizedError {
 
 /// Fetches and parses an RSS 2.0 podcast feed (with the common iTunes extensions).
 enum FeedLoader {
+    /// Real feeds top out around a few MB even with thousands of episodes.
+    static let maxFeedBytes: Int64 = 32 << 20
+
     static func load(_ url: URL) async throws -> ParsedFeed {
         try await load(url, followingDiscovery: true)
     }
@@ -31,9 +34,22 @@ enum FeedLoader {
         // would otherwise be answered from URLCache for the whole window.
         request.cachePolicy = .reloadIgnoringLocalCacheData
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
         if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
             throw FeedError(message: "Feed returned HTTP \(http.statusCode).")
+        }
+        // Feeds are parsed in memory; a runaway or hostile response must not
+        // be allowed to grow without bound (Refresh All fetches many at once).
+        if response.expectedContentLength > maxFeedBytes {
+            throw FeedError(message: "The feed is too large to load (over \(maxFeedBytes >> 20) MB).")
+        }
+        var data = Data()
+        data.reserveCapacity(Int(max(0, min(response.expectedContentLength, maxFeedBytes))))
+        for try await byte in bytes {
+            data.append(byte)
+            if data.count > maxFeedBytes {
+                throw FeedError(message: "The feed is too large to load (over \(maxFeedBytes >> 20) MB).")
+            }
         }
 
         // The most common mistake is pasting the show's web page. If that page
@@ -265,8 +281,12 @@ enum RSSDate {
             "EEE, dd MMM yyyy HH:mm:ss Z",
             "EEE, dd MMM yyyy HH:mm:ss zzz",
             "EEE, dd MMM yyyy HH:mm Z",
+            "EEE, dd MMM yyyy HH:mm:ss",       // no zone: assume UTC
             "dd MMM yyyy HH:mm:ss Z",
+            "dd MMM yyyy HH:mm:ss",
+            "EEE, d MMM yyyy HH:mm:ss Z",
             "EEE, dd MMM yy HH:mm:ss Z",
+            "EEE, dd MMM yy HH:mm:ss zzz",
             "yyyy-MM-dd'T'HH:mm:ssZ",
             "yyyy-MM-dd'T'HH:mm:ss.SSSZ",
             "yyyy-MM-dd HH:mm:ss",
@@ -285,9 +305,19 @@ enum RSSDate {
         let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !s.isEmpty else { return nil }
         for df in formatters {
-            if let d = df.date(from: s) { return d }
+            if let d = df.date(from: s) { return plausible(d) }
         }
         return ISO8601DateFormatter().date(from: s)
+    }
+
+    /// A "yyyy" pattern happily reads "26" as the year 26; feeds that write
+    /// two-digit years mean this century.
+    private static func plausible(_ date: Date) -> Date {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(secondsFromGMT: 0)!
+        let year = cal.component(.year, from: date)
+        guard year < 100 else { return date }
+        return cal.date(byAdding: .year, value: 2000, to: date) ?? date
     }
 }
 
@@ -335,9 +365,43 @@ enum HTMLStripper {
     static func strip(_ html: String) -> String {
         var s = html.replacingOccurrences(of: "<br\\s*/?>|</p>|</li>", with: "\n", options: [.regularExpression, .caseInsensitive])
         s = s.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
-        let entities = ["&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": "\"", "&#39;": "'", "&apos;": "'", "&nbsp;": " "]
-        for (k, v) in entities { s = s.replacingOccurrences(of: k, with: v) }
+        s = decodeEntities(s)
         s = s.replacingOccurrences(of: "\n{3,}", with: "\n\n", options: .regularExpression)
         return s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Decodes `&amp;`-style, `&#8217;` and `&#x2019;` references, plus the
+    /// named entities in `HTMLEntities.named`.
+    static func decodeEntities(_ text: String) -> String {
+        guard text.contains("&"),
+              let regex = try? NSRegularExpression(pattern: "&(#x[0-9A-Fa-f]+|#[0-9]+|[A-Za-z][A-Za-z0-9]*);") else { return text }
+        let ns = text as NSString
+        var out = ""
+        var cursor = 0
+        for match in regex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+            let ref = ns.substring(with: match.range(at: 1))
+            let replacement: String?
+            if ref.hasPrefix("#x") || ref.hasPrefix("#X") {
+                replacement = UInt32(ref.dropFirst(2), radix: 16).flatMap(Unicode.Scalar.init).map { String(Character($0)) }
+            } else if ref.hasPrefix("#") {
+                replacement = UInt32(ref.dropFirst()).flatMap(Unicode.Scalar.init).map { String(Character($0)) }
+            } else {
+                switch ref {
+                case "amp": replacement = "&"
+                case "lt": replacement = "<"
+                case "gt": replacement = ">"
+                case "quot": replacement = "\""
+                case "apos": replacement = "'"
+                case "nbsp": replacement = " "
+                default: replacement = HTMLEntities.named[ref].flatMap { Unicode.Scalar(UInt32($0)) }.map { String(Character($0)) }
+                }
+            }
+            guard let replacement else { continue }
+            out += ns.substring(with: NSRange(location: cursor, length: match.range.location - cursor))
+            out += replacement
+            cursor = match.range.location + match.range.length
+        }
+        out += ns.substring(from: cursor)
+        return out
     }
 }
