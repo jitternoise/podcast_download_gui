@@ -453,12 +453,23 @@ final class AppModel {
         return succeeded
     }
 
+    /// How many feeds "Refresh All" fetches at once. Each open connection
+    /// holds sizeable buffers, so 49 at a time is ~70 MB of peak memory for
+    /// no real speed gain over a handful.
+    static let refreshConcurrency = 6
+    private let refreshGate = AsyncSemaphore(limit: AppModel.refreshConcurrency)
+
     /// Manual "refresh everything" — always runs.
     func refreshAll() async {
         guard !library.podcasts.isEmpty else { return }
-        // Fan out on the main actor (each refresh awaits its own network call).
+        // Fan out on the main actor (each refresh awaits its own network call),
+        // a few at a time.
         let tasks = library.podcasts.map { podcast in
-            Task { @MainActor in await self.refresh(podcast) }
+            Task { @MainActor in
+                await self.refreshGate.wait()
+                defer { Task { await self.refreshGate.signal() } }
+                return await self.refresh(podcast)
+            }
         }
         var anySucceeded = false
         for task in tasks where await task.value { anySucceeded = true }

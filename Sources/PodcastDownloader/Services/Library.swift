@@ -65,6 +65,8 @@ final class Library {
     init(fileURL: URL? = nil) {
         if let fileURL {
             self.fileURL = fileURL
+        } else if let sandbox = Sandbox.dataDirectory {
+            self.fileURL = sandbox.appendingPathComponent("library.json")
         } else {
             let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
                 .appendingPathComponent("PodcastDownloader", isDirectory: true)

@@ -119,6 +119,29 @@ final class AppModelTests: XCTestCase {
         XCTAssertNotNil(model.localFile(for: a, in: show), "recorded relative path resolves under the new master")
     }
 
+    func testRefreshAllFetchesOnlyAFewFeedsAtOnce() async {
+        for i in 0..<20 {
+            model.library.subscribe(Podcast(title: "S\(i)", author: "", feedURL: URL(string: "https://example.com/\(i)")!))
+        }
+        let counter = ConcurrencyCounter()
+        model.library.loadFeed = { _ in
+            await counter.enter()
+            try? await Task.sleep(for: .milliseconds(40))
+            await counter.leave()
+            var feed = ParsedFeed(); feed.title = "ok"
+            return feed
+        }
+
+        await model.refreshAll()
+
+        let peak = await counter.peak
+        let total = await counter.total
+        XCTAssertLessThanOrEqual(peak, AppModel.refreshConcurrency)
+        XCTAssertGreaterThan(peak, 1, "still parallel, just bounded")
+        XCTAssertEqual(total, 20, "every feed was refreshed")
+        XCTAssertNotNil(model.library.lastFullRefresh)
+    }
+
     func testFolderProblemSuspendsAutoDownloadAndIsReported() async throws {
         model.adoptMasterDirectory(root.appendingPathComponent("gone/volume/Podcasts"))
         try await Task.sleep(for: .milliseconds(300))   // rescan is detached
@@ -127,4 +150,13 @@ final class AppModelTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(300))
         XCTAssertNil(model.folderProblem)
     }
+}
+
+/// Tracks how many callers are inside a section at the same time.
+actor ConcurrencyCounter {
+    private(set) var current = 0
+    private(set) var peak = 0
+    private(set) var total = 0
+    func enter() { current += 1; total += 1; peak = max(peak, current) }
+    func leave() { current -= 1 }
 }

@@ -127,6 +127,13 @@ Sources/PodcastDownloader/
 | Refresh all subscriptions | ⌘R |
 | Settings | ⌘, |
 
+To try the app without touching your real library and settings, point it at
+a scratch folder:
+
+```bash
+PODCAST_DATA_DIR=/tmp/podcast-scratch swift run
+```
+
 ## Tests
 
 ```bash

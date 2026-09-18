@@ -73,7 +73,10 @@ final class AppSettings {
     /// `swift run` has no bundle identifier and would otherwise read a
     /// different defaults domain than the packaged app.
     nonisolated static func sharedDefaults() -> UserDefaults {
-        Bundle.main.bundleIdentifier == nil
+        if Sandbox.dataDirectory != nil {
+            return UserDefaults(suiteName: "com.jitternoise.podcastdownloader.sandbox") ?? .standard
+        }
+        return Bundle.main.bundleIdentifier == nil
             ? (UserDefaults(suiteName: "com.jitternoise.podcastdownloader") ?? .standard)
             : .standard
     }
@@ -98,6 +101,10 @@ final class AppSettings {
     }
 
     private static func resolveMasterDirectory(from defaults: UserDefaults) -> URL {
+        if let sandbox = Sandbox.dataDirectory {
+            return defaults.string(forKey: Keys.masterDirectory).map { URL(fileURLWithPath: $0, isDirectory: true) }
+                ?? sandbox.appendingPathComponent("Podcasts", isDirectory: true)
+        }
         if let data = defaults.data(forKey: Keys.masterDirectoryBookmark) {
             var stale = false
             if let url = try? URL(resolvingBookmarkData: data, options: [.withoutUI], bookmarkDataIsStale: &stale),
@@ -137,5 +144,17 @@ final class AppSettings {
 
     func file(for episode: Episode, in podcast: Podcast) -> URL {
         folder(for: podcast).appendingPathComponent(episode.fileName)
+    }
+}
+
+/// A scratch instance of the app: `PODCAST_DATA_DIR=/some/folder` makes it
+/// keep its library, preferences and default download folder there instead
+/// of the real ones. For testing and for trying things without risk.
+enum Sandbox {
+    nonisolated static var dataDirectory: URL? {
+        guard let path = ProcessInfo.processInfo.environment["PODCAST_DATA_DIR"], !path.isEmpty else { return nil }
+        let url = URL(fileURLWithPath: path, isDirectory: true)
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
     }
 }
