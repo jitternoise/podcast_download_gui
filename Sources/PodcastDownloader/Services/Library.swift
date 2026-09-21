@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Observation
 
@@ -8,26 +9,75 @@ struct EpisodeRef: Identifiable, Hashable {
     var id: String { podcast.id + "|" + episode.id }
 }
 
+/// Where one downloaded episode was stored, as recorded when the transfer
+/// completed. The size and checksum let "Verify Library" tell a file that
+/// changed or was cut short from one that is exactly what was fetched.
+struct DownloadRecord: Codable, Hashable {
+    /// Relative to the master folder.
+    var path: String
+    var size: Int64?
+    var sha256: String?
+
+    init(path: String, size: Int64? = nil, sha256: String? = nil) {
+        self.path = path
+        self.size = size
+        self.sha256 = sha256
+    }
+
+    /// Library versions before 3 stored just the path.
+    init(from decoder: Decoder) throws {
+        if let single = try? decoder.singleValueContainer(), let path = try? single.decode(String.self) {
+            self.path = path
+            return
+        }
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        path = try c.decode(String.self, forKey: .path)
+        size = try c.decodeIfPresent(Int64.self, forKey: .size)
+        sha256 = try c.decodeIfPresent(String.self, forKey: .sha256)
+    }
+}
+
 /// Subscriptions, cached episodes, and the record of what has been downloaded.
-/// Persisted as a single JSON file in ~/Library/Application Support.
+///
+/// Persisted in ~/Library/Application Support as `library.json` (the
+/// subscriptions) plus one `shows/<id>.json` per subscription holding its
+/// episodes and per-episode state. A playback tick or a refresh rewrites one
+/// show's file, not the whole library, so the size of the library doesn't set
+/// the cost of a save. Show notes as the feed published them (HTML) live in
+/// `notes/<id>.json` and are only read when an episode's notes are opened.
 ///
 /// Download locations are stored *relative to the master folder* so the whole
 /// library can be moved by simply pointing the app at a new folder.
 @MainActor
 @Observable
 final class Library {
-    private struct Snapshot: Codable {
-        /// 1 (or absent): per-episode maps keyed by guid. 2: keyed by `Episode.key`.
+    /// `library.json`. Per-episode state here belongs to no current
+    /// subscription: files played from the Downloads tab, shows since
+    /// unsubscribed. Versions 1 and 2 held every show's episodes as well.
+    private struct Index: Codable {
+        /// 1 (or absent): per-episode maps keyed by guid. 2: keyed by
+        /// `Episode.key`. 3: episodes and per-show state in `shows/`.
         var version: Int?
         var podcasts: [Podcast]
-        var episodes: [String: [Episode]]
-        var downloaded: [String: String]
-        var lastRefreshed: [String: Date]
-        var playbackPositions: [String: Double]?
         var lastFullRefresh: Date?
+        var downloaded: [String: DownloadRecord]?
+        var playbackPositions: [String: Double]?
         var played: [String]?
+        // Versions 1 and 2 only.
+        var episodes: [String: [Episode]]?
+        var lastRefreshed: [String: Date]?
     }
-    private static let currentVersion = 2
+
+    /// `shows/<id>.json`: everything about one subscription.
+    private struct ShowFile: Codable {
+        var podcastID: String
+        var episodes: [Episode]
+        var downloaded: [String: DownloadRecord]
+        var playbackPositions: [String: Double]
+        var played: [String]
+        var lastRefreshed: Date?
+    }
+    nonisolated private static let currentVersion = 3
 
     private(set) var podcasts: [Podcast] = [] {
         didSet { latestCache = nil }
@@ -35,9 +85,9 @@ final class Library {
     private(set) var episodes: [String: [Episode]] = [:] {  // podcast id -> episodes, newest first
         didSet { latestCache = nil }
     }
-    private var latestCache: [EpisodeRef]?
-    private(set) var downloaded: [String: String] = [:] {   // episode key -> path relative to master folder
-        didSet { downloadedOwners = Dictionary(downloaded.map { ($1, $0) }, uniquingKeysWith: { a, _ in a }) }
+    private var latestCache: (limit: Int, items: [EpisodeRef])?
+    private(set) var downloaded: [String: DownloadRecord] = [:] {   // episode key -> where it was saved
+        didSet { downloadedOwners = Dictionary(downloaded.map { ($1.path, $0) }, uniquingKeysWith: { a, _ in a }) }
     }
     private var downloadedOwners: [String: String] = [:]     // relative path -> episode key
     private(set) var lastRefreshed: [String: Date] = [:]     // podcast id -> date
@@ -46,7 +96,7 @@ final class Library {
     private(set) var played: Set<String> = []                  // episode keys played to the end (or marked)
     private(set) var refreshing: Set<String> = []
     var refreshErrors: [String: String] = [:]                // podcast id -> last error
-    /// Set when library.json existed but couldn't be read; the file was kept aside.
+    /// Set when a library file existed but couldn't be read; the file was kept aside.
     private(set) var loadError: String?
 
     /// Fetches a feed. Replaceable so refresh logic can be tested without a network.
@@ -54,14 +104,34 @@ final class Library {
 
     private let fileURL: URL
     private var didBackUpThisSession = false
+
+    // What must be written: the index, and which shows. Decided per mutation
+    // so a position tick touches one file.
+    private var dirtyIndex = false
+    private var dirtyShows: Set<String> = []
+    private var removedShows: Set<String> = []
+    /// HTML show notes from the latest refresh of a subscribed show, until
+    /// they have been written to `notes/`.
+    private var pendingNotes: [String: [String: String]] = [:]
+    /// Notes read from disk (or fetched for a show that isn't subscribed),
+    /// a few shows at a time so opening notes doesn't grow the app.
+    private var notesCache: [String: [String: String]] = [:]
+    private var notesCacheOrder: [String] = []
+    private static let notesCacheLimit = 3
+
     /// Pending write, coalesced so a burst of mutations (Refresh All, a
     /// playback tick) costs one encode on a background thread, not many on
     /// the main actor.
     private var saveTask: Task<Void, Never>?
     /// How long mutations are coalesced before hitting the disk.
     var saveDelay: Duration = .milliseconds(500)
+    /// All writes go through one serial queue: they land in the order they
+    /// were taken, and a synchronous flush waits for whatever is in flight.
+    private static let writeQueue = DispatchQueue(label: "PodcastDownloader.library-write", qos: .utility)
 
-    /// - Parameter fileURL: where to persist; defaults to Application Support. Tests pass a temp file.
+    /// - Parameter fileURL: where to persist; defaults to Application Support.
+    ///   Tests pass a file in a temp folder of their own — `shows/` and
+    ///   `notes/` are created next to it.
     init(fileURL: URL? = nil) {
         if let fileURL {
             self.fileURL = fileURL
@@ -74,6 +144,21 @@ final class Library {
             self.fileURL = support.appendingPathComponent("library.json")
         }
         load()
+    }
+
+    private var directory: URL { fileURL.deletingLastPathComponent() }
+    private var showsDirectory: URL { directory.appendingPathComponent("shows", isDirectory: true) }
+    private var notesDirectory: URL { directory.appendingPathComponent("notes", isDirectory: true) }
+
+    /// `shows/` and `notes/` file name for a podcast: a hash of the feed URL,
+    /// which is stable, unique, and safe on every file system.
+    nonisolated static func fileName(for podcastID: String) -> String {
+        SHA256.hash(data: Data(podcastID.utf8)).prefix(16).map { String(format: "%02x", $0) }.joined() + ".json"
+    }
+
+    /// The podcast an episode key belongs to (`Episode.key` is `podcastID|id`).
+    nonisolated private static func owner(of key: String) -> Substring {
+        key.prefix { $0 != "|" }
     }
 
     // MARK: Queries
@@ -90,13 +175,22 @@ final class Library {
         episodes[podcast.id] ?? []
     }
 
+    /// The cached episode behind a per-episode key, with its podcast.
+    func episodeRef(forKey key: String) -> EpisodeRef? {
+        guard let podcast = podcast(withID: String(Self.owner(of: key))),
+              let episode = episodes(for: podcast).first(where: { $0.key == key }) else { return nil }
+        return EpisodeRef(episode: episode, podcast: podcast)
+    }
+
     /// The newest episodes across every subscription, newest first.
     /// Episodes without a publish date sort last. Sorted once per change,
-    /// not once per view update.
+    /// not once per view update — and only as much as needed: each show's
+    /// list is already newest first, so the newest `limit` overall are among
+    /// the newest `limit` of each show.
     func latestEpisodes(limit: Int = 100) -> [EpisodeRef] {
-        if let latestCache { return Array(latestCache.prefix(limit)) }
-        let all = podcasts
-            .flatMap { podcast in episodes(for: podcast).map { EpisodeRef(episode: $0, podcast: podcast) } }
+        if let latestCache, latestCache.limit >= limit { return Array(latestCache.items.prefix(limit)) }
+        let top = podcasts
+            .flatMap { podcast in episodes(for: podcast).prefix(limit).map { EpisodeRef(episode: $0, podcast: podcast) } }
             .sorted { a, b in
                 switch (a.episode.publishedAt, b.episode.publishedAt) {
                 case let (x?, y?): return x > y
@@ -105,8 +199,9 @@ final class Library {
                 case (nil, nil): return a.episode.title < b.episode.title
                 }
             }
-        latestCache = all
-        return Array(all.prefix(limit))
+            .prefix(limit)
+        latestCache = (limit, Array(top))
+        return Array(top)
     }
 
     /// Every episode across subscriptions; use `latestEpisodes` for the top of the list.
@@ -114,7 +209,7 @@ final class Library {
 
     /// Path relative to the master folder where this episode was saved, if known.
     func downloadedRelativePath(for episode: Episode) -> String? {
-        downloaded[episode.key]
+        downloaded[episode.key]?.path
     }
 
     /// The episode recorded as having been saved to this master-relative path, if any.
@@ -128,32 +223,54 @@ final class Library {
         guard !isSubscribed(podcast) else { return }
         podcasts.append(podcast)
         podcasts.sort { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
-        save()
+        // Its state (if it was subscribed before) moves out of the index
+        // into its own file; notes fetched while previewing get written.
+        removedShows.remove(podcast.id)
+        if let notes = notesCache.removeValue(forKey: podcast.id) {
+            notesCacheOrder.removeAll { $0 == podcast.id }
+            pendingNotes[podcast.id] = notes
+        }
+        dirtyIndex = true
+        save(show: podcast.id)
     }
 
     func unsubscribe(_ podcast: Podcast) {
         podcasts.removeAll { $0.id == podcast.id }
         // The episode cache stays for the session so the detail view keeps
         // showing the show (and re-subscribing is instant); it is not persisted.
+        // Downloads, positions and played marks are kept in the index.
         lastRefreshed[podcast.id] = nil
         refreshErrors[podcast.id] = nil
-        save()
+        dirtyShows.remove(podcast.id)
+        removedShows.insert(podcast.id)
+        pendingNotes[podcast.id] = nil
+        saveIndex()
     }
 
     func update(_ podcast: Podcast) {
         guard let idx = podcasts.firstIndex(where: { $0.id == podcast.id }) else { return }
         podcasts[idx] = podcast
-        save()
+        saveIndex()
     }
 
-    func markDownloaded(_ episode: Episode, relativePath: String) {
-        downloaded[episode.key] = relativePath
-        save()
+    func markDownloaded(_ episode: Episode, relativePath: String, size: Int64? = nil, sha256: String? = nil) {
+        downloaded[episode.key] = DownloadRecord(path: relativePath, size: size, sha256: sha256)
+        save(for: episode)
+    }
+
+    /// Records the size/checksum "Verify Library" measured for a download that
+    /// had none on record (from before checksums were kept).
+    func setDownloadBaseline(size: Int64?, sha256: String?, forKey key: String) {
+        guard var record = downloaded[key] else { return }
+        if let size { record.size = size }
+        if let sha256 { record.sha256 = sha256 }
+        downloaded[key] = record
+        save(show: String(Self.owner(of: key)))
     }
 
     func markFullRefresh(at date: Date = Date()) {
         lastFullRefresh = date
-        save()
+        saveIndex()
     }
 
     func playbackPosition(for episode: Episode) -> Double {
@@ -162,12 +279,12 @@ final class Library {
 
     func setPlaybackPosition(_ seconds: Double, for episode: Episode) {
         playbackPositions[episode.key] = seconds > 0 ? seconds : nil
-        save()
+        save(for: episode)
     }
 
     func forgetDownload(_ episode: Episode) {
         downloaded[episode.key] = nil
-        save()
+        save(for: episode)
     }
 
     func isPlayed(_ episode: Episode) -> Bool { played.contains(episode.key) }
@@ -179,27 +296,29 @@ final class Library {
         } else {
             played.remove(episode.key)
         }
-        save()
+        save(for: episode)
     }
 
     /// Converts any absolute paths saved by earlier versions into master-relative ones.
     func migrateDownloadPaths(masterDirectory: URL) {
         let prefix = masterDirectory.standardizedFileURL.path + "/"
-        var changed = false
-        for (id, path) in downloaded where path.hasPrefix("/") {
-            if path.hasPrefix(prefix) {
-                downloaded[id] = String(path.dropFirst(prefix.count))
+        for (key, record) in downloaded where record.path.hasPrefix("/") {
+            if record.path.hasPrefix(prefix) {
+                var updated = record
+                updated.path = String(record.path.dropFirst(prefix.count))
+                downloaded[key] = updated
             } else {
-                downloaded[id] = nil
+                downloaded[key] = nil
             }
-            changed = true
+            save(show: String(Self.owner(of: key)))
         }
-        if changed { save() }
     }
 
     /// Cache episodes for a podcast the user is only previewing (not subscribed).
-    func cacheEpisodes(_ list: [Episode], for podcast: Podcast) {
-        episodes[podcast.id] = Self.stamp(list, with: podcast.id)
+    /// Lists are always kept newest first (`latestEpisodes` relies on it).
+    func cacheEpisodes(_ list: [Episode], for podcast: Podcast, notes: [String: String] = [:]) {
+        episodes[podcast.id] = Self.stamp(list.sorted(by: Episode.newestFirst), with: podcast.id)
+        storeNotes(notes, for: podcast.id)
     }
 
     private static func stamp(_ list: [Episode], with podcastID: String) -> [Episode] {
@@ -227,6 +346,7 @@ final class Library {
             let newEpisodes = hadPrevious ? sorted.filter { !previousIDs.contains($0.id) } : []
 
             episodes[podcast.id] = sorted
+            storeNotes(feed.notesHTML, for: podcast.id)
             refreshErrors[podcast.id] = nil
 
             // Overlay the feed's metadata onto the *current* record, not the
@@ -240,7 +360,8 @@ final class Library {
                 if updated.artworkURL == nil { updated.artworkURL = feed.artworkURL }
                 podcasts[idx] = updated
                 lastRefreshed[podcast.id] = Date()
-                save()
+                dirtyIndex = true
+                save(show: podcast.id)
             }
             return newEpisodes
         } catch is CancellationError {
@@ -253,34 +374,133 @@ final class Library {
         }
     }
 
+    // MARK: Show notes
+
+    /// The episode's show notes as the feed published them (HTML), when they
+    /// carry more than the plain-text `summary`. Read from disk on demand.
+    func notesHTML(for episode: Episode) async -> String? {
+        guard let podcastID = episode.podcastID else { return nil }
+        if let notes = pendingNotes[podcastID] ?? notesCache[podcastID] { return notes[episode.id] }
+        guard podcast(withID: podcastID) != nil else { return nil }
+        let url = notesDirectory.appendingPathComponent(Self.fileName(for: podcastID))
+        let loaded = await Task.detached(priority: .userInitiated) {
+            (try? JSONDecoder().decode([String: String].self, from: Data(contentsOf: url))) ?? [:]
+        }.value
+        // A refresh may have landed meanwhile; its notes take precedence.
+        if let fresh = pendingNotes[podcastID] { return fresh[episode.id] }
+        cacheNotes(loaded, for: podcastID)
+        return loaded[episode.id]
+    }
+
+    /// New notes for a show: queued for the show's next write when subscribed,
+    /// otherwise kept in memory for the session (a previewed show).
+    private func storeNotes(_ notes: [String: String], for podcastID: String) {
+        notesCache[podcastID] = nil
+        notesCacheOrder.removeAll { $0 == podcastID }
+        if podcast(withID: podcastID) != nil {
+            pendingNotes[podcastID] = notes
+        } else if !notes.isEmpty {
+            cacheNotes(notes, for: podcastID)
+        }
+    }
+
+    private func cacheNotes(_ notes: [String: String], for podcastID: String) {
+        notesCache[podcastID] = notes
+        notesCacheOrder.removeAll { $0 == podcastID }
+        notesCacheOrder.append(podcastID)
+        while notesCacheOrder.count > Self.notesCacheLimit {
+            notesCache[notesCacheOrder.removeFirst()] = nil
+        }
+    }
+
     // MARK: Persistence
 
     private func load() {
         let fm = FileManager.default
         guard fm.fileExists(atPath: fileURL.path) else { return }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        let snap: Snapshot
+        let index: Index
         do {
-            snap = try decoder.decode(Snapshot.self, from: try Data(contentsOf: fileURL))
+            index = try Self.decoder().decode(Index.self, from: try Data(contentsOf: fileURL))
         } catch {
             // Never let the next save() bury a file we couldn't read: keep it
             // aside under a name the user can find, and say so.
-            let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
-            let aside = fileURL.deletingLastPathComponent().appendingPathComponent("\(fileURL.lastPathComponent).corrupt-\(stamp)")
-            try? fm.moveItem(at: fileURL, to: aside)
-            loadError = "The subscriptions file couldn't be read (\(error.localizedDescription)). It was kept as \(aside.lastPathComponent) and the app started with an empty library."
+            let aside = Self.setAside(fileURL)
+            loadError = "The subscriptions file couldn't be read (\(error.localizedDescription)). It was kept as \(aside) and the app started with an empty library."
             NSLog("Failed to load library: \(error)")
             return
         }
-        podcasts = snap.podcasts
-        episodes = snap.episodes
-        downloaded = snap.downloaded
-        lastRefreshed = snap.lastRefreshed
-        playbackPositions = snap.playbackPositions ?? [:]
-        lastFullRefresh = snap.lastFullRefresh
-        played = Set(snap.played ?? [])
-        if (snap.version ?? 1) < 2 { migrateToCompositeKeys() }
+        podcasts = index.podcasts
+        lastFullRefresh = index.lastFullRefresh
+        downloaded = index.downloaded ?? [:]
+        playbackPositions = index.playbackPositions ?? [:]
+        played = Set(index.played ?? [])
+
+        let version = index.version ?? 1
+        if version < Self.currentVersion {
+            // One file held everything: take the episodes from it and write
+            // the split layout. library.json.bak keeps the old file.
+            episodes = (index.episodes ?? [:]).reduce(into: [:]) { $0[$1.key] = Self.stamp($1.value, with: $1.key) }
+            lastRefreshed = index.lastRefreshed ?? [:]
+            if version < 2 { migrateToCompositeKeys() }
+            dirtyIndex = true
+            dirtyShows = Set(podcasts.map(\.id))
+            scheduleWrite()
+        } else {
+            loadShows()
+        }
+    }
+
+    /// Reads every subscription's `shows/` file, in parallel: decoding is the
+    /// cost of launch, and it splits evenly across cores.
+    private func loadShows() {
+        let entries = podcasts.map { ($0, showsDirectory.appendingPathComponent(Self.fileName(for: $0.id))) }
+        final class Collector: @unchecked Sendable {
+            let lock = NSLock()
+            var shows: [ShowFile] = []
+            var problems: [String] = []
+        }
+        let collector = Collector()
+        DispatchQueue.concurrentPerform(iterations: entries.count) { i in
+            let (podcast, url) = entries[i]
+            guard FileManager.default.fileExists(atPath: url.path) else { return }
+            do {
+                let show = try Self.decoder().decode(ShowFile.self, from: try Data(contentsOf: url))
+                collector.lock.withLock { collector.shows.append(show) }
+            } catch {
+                let aside = Self.setAside(url)
+                NSLog("Failed to load episodes for \(podcast.title): \(error)")
+                collector.lock.withLock {
+                    collector.problems.append("“\(podcast.title)” (kept as shows/\(aside); it will be rebuilt by the next refresh)")
+                }
+            }
+        }
+        // Build the maps once and assign once: `downloaded`'s observer
+        // re-indexes the whole map on every assignment.
+        var allEpisodes = episodes, allDownloaded = downloaded, allPositions = playbackPositions
+        var allPlayed = played, allRefreshed = lastRefreshed
+        for show in collector.shows {
+            allEpisodes[show.podcastID] = Self.stamp(show.episodes, with: show.podcastID)
+            allDownloaded.merge(show.downloaded) { _, new in new }
+            allPositions.merge(show.playbackPositions) { _, new in new }
+            allPlayed.formUnion(show.played)
+            allRefreshed[show.podcastID] = show.lastRefreshed
+        }
+        episodes = allEpisodes
+        downloaded = allDownloaded
+        playbackPositions = allPositions
+        played = allPlayed
+        lastRefreshed = allRefreshed
+        if !collector.problems.isEmpty {
+            loadError = "The episode list couldn't be read for " + collector.problems.sorted().joined(separator: ", ") + "."
+        }
+    }
+
+    /// Moves an unreadable file out of the way; returns the new name.
+    nonisolated private static func setAside(_ url: URL) -> String {
+        let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+        let aside = url.deletingLastPathComponent().appendingPathComponent("\(url.lastPathComponent).corrupt-\(stamp)")
+        try? FileManager.default.moveItem(at: url, to: aside)
+        return aside.lastPathComponent
     }
 
     /// v1 keyed downloads and positions by the feed's guid alone; stamp the
@@ -290,20 +510,39 @@ final class Library {
             let stamped = Self.stamp(list, with: podcastID)
             episodes[podcastID] = stamped
             for episode in stamped where episode.key != episode.id {
-                if downloaded[episode.key] == nil, let path = downloaded.removeValue(forKey: episode.id) {
-                    downloaded[episode.key] = path
+                if downloaded[episode.key] == nil, let record = downloaded.removeValue(forKey: episode.id) {
+                    downloaded[episode.key] = record
                 }
                 if playbackPositions[episode.key] == nil, let pos = playbackPositions.removeValue(forKey: episode.id) {
                     playbackPositions[episode.key] = pos
                 }
             }
         }
-        save()
+    }
+
+    /// State keyed by an episode belongs to its show's file when the show is
+    /// subscribed, otherwise to the index.
+    private func save(for episode: Episode) {
+        save(show: episode.podcastID)
+    }
+
+    private func save(show id: String?) {
+        if let id, podcast(withID: id) != nil {
+            dirtyShows.insert(id)
+        } else {
+            dirtyIndex = true
+        }
+        scheduleWrite()
+    }
+
+    private func saveIndex() {
+        dirtyIndex = true
+        scheduleWrite()
     }
 
     /// Schedules a write. Encoding and I/O happen off the main actor after a
     /// short delay so bursts collapse into one write; `flush()` forces it.
-    private func save() {
+    private func scheduleWrite() {
         saveTask?.cancel()
         saveTask = Task { [saveDelay] in
             try? await Task.sleep(for: saveDelay)
@@ -321,50 +560,145 @@ final class Library {
     }
 
     /// Synchronous variant for app termination, where nothing can await.
+    /// Waits for any write already in flight, then lands this one.
     func flushNow() {
         guard saveTask != nil else { return }
         saveTask?.cancel()
         saveTask = nil
-        let snap = snapshot()
-        let url = fileURL
-        backUpOncePerSession()
-        Self.write(snap, to: url)
+        let plan = takePlan()
+        Self.writeQueue.sync { Self.write(plan) }
+        didWrite(plan)
     }
 
     private func write() async {
-        let snap = snapshot()
-        let url = fileURL
+        let plan = takePlan()
+        await withCheckedContinuation { continuation in
+            Self.writeQueue.async {
+                Self.write(plan)
+                continuation.resume()
+            }
+        }
+        didWrite(plan)
+        if dirtyShows.isEmpty, !dirtyIndex, removedShows.isEmpty { saveTask = nil }
+    }
+
+    /// Everything the writer needs, taken on the main actor: copies of the
+    /// maps (copy-on-write, so cheap) and which files are due. Splitting the
+    /// maps per show happens on the writer's thread.
+    private struct WritePlan: Sendable {
+        var index: URL?
+        var indexData: (podcasts: [Podcast], lastFullRefresh: Date?)
+        var shows: [String: URL]            // podcast id -> file, for shows due a write
+        var notes: [String: (URL, [String: String])]
+        var remove: [URL]
+        var subscribed: Set<String>
+        var episodes: [String: [Episode]]
+        var downloaded: [String: DownloadRecord]
+        var playbackPositions: [String: Double]
+        var played: Set<String>
+        var lastRefreshed: [String: Date]
+    }
+
+    private func takePlan() -> WritePlan {
         backUpOncePerSession()
-        await Task.detached(priority: .utility) { Self.write(snap, to: url) }.value
-        saveTask = nil
-    }
-
-    private func snapshot() -> Snapshot {
-        Snapshot(
-            version: Self.currentVersion,
-            podcasts: podcasts,
-            episodes: episodes.filter { key, _ in podcasts.contains { $0.id == key } },
-            downloaded: downloaded,
-            lastRefreshed: lastRefreshed,
-            playbackPositions: playbackPositions,
-            lastFullRefresh: lastFullRefresh,
-            played: Array(played).sorted()
+        var plan = WritePlan(
+            index: dirtyIndex ? fileURL : nil,
+            indexData: (podcasts, lastFullRefresh),
+            shows: [:], notes: [:], remove: [],
+            subscribed: Set(podcasts.map(\.id)),
+            episodes: episodes, downloaded: downloaded, playbackPositions: playbackPositions,
+            played: played, lastRefreshed: lastRefreshed
         )
+        for id in dirtyShows where plan.subscribed.contains(id) {
+            plan.shows[id] = showsDirectory.appendingPathComponent(Self.fileName(for: id))
+            if let notes = pendingNotes[id] {
+                plan.notes[id] = (notesDirectory.appendingPathComponent(Self.fileName(for: id)), notes)
+            }
+        }
+        for id in removedShows {
+            plan.remove.append(showsDirectory.appendingPathComponent(Self.fileName(for: id)))
+            plan.remove.append(notesDirectory.appendingPathComponent(Self.fileName(for: id)))
+        }
+        dirtyIndex = false
+        dirtyShows = []
+        removedShows = []
+        return plan
     }
 
-    private nonisolated static func write(_ snap: Snapshot, to url: URL) {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.sortedKeys]
-        do {
-            let data = try encoder.encode(snap)
-            try data.write(to: url, options: .atomic)
-        } catch {
-            NSLog("Failed to save library: \(error)")
+    private func didWrite(_ plan: WritePlan) {
+        // Notes that were written are no longer pending — unless a newer
+        // refresh replaced them meanwhile.
+        for (id, entry) in plan.notes where pendingNotes[id] == entry.1 {
+            pendingNotes[id] = nil
+            notesCache[id] = nil
+            notesCacheOrder.removeAll { $0 == id }
         }
     }
 
-    /// Keeps last session's file as library.json.bak before this session first overwrites it.
+    nonisolated private static func write(_ plan: WritePlan) {
+        let fm = FileManager.default
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+
+        // One pass over the per-episode maps sorts them into the shows being
+        // written and the leftovers that belong in the index.
+        var downloaded: [String: [String: DownloadRecord]] = [:]
+        var positions: [String: [String: Double]] = [:]
+        var played: [String: [String]] = [:]
+        let loose = "" // key for state outside any subscription
+        func bucket(_ key: String) -> String? {
+            let show = String(owner(of: key))
+            if plan.shows[show] != nil { return show }
+            return plan.subscribed.contains(show) ? nil : loose
+        }
+        for (key, record) in plan.downloaded { if let b = bucket(key) { downloaded[b, default: [:]][key] = record } }
+        for (key, pos) in plan.playbackPositions { if let b = bucket(key) { positions[b, default: [:]][key] = pos } }
+        for key in plan.played { if let b = bucket(key) { played[b, default: []].append(key) } }
+
+        func put<T: Encodable>(_ value: T, at url: URL) {
+            do {
+                try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try encoder.encode(value).write(to: url, options: .atomic)
+            } catch {
+                NSLog("Failed to save \(url.lastPathComponent): \(error)")
+            }
+        }
+        for (id, url) in plan.shows {
+            put(ShowFile(
+                podcastID: id,
+                episodes: plan.episodes[id] ?? [],
+                downloaded: downloaded[id] ?? [:],
+                playbackPositions: positions[id] ?? [:],
+                played: (played[id] ?? []).sorted(),
+                lastRefreshed: plan.lastRefreshed[id]
+            ), at: url)
+        }
+        for entry in plan.notes.values {
+            put(entry.1, at: entry.0)
+        }
+        if let url = plan.index {
+            put(Index(
+                version: currentVersion,
+                podcasts: plan.indexData.podcasts,
+                lastFullRefresh: plan.indexData.lastFullRefresh,
+                downloaded: downloaded[loose] ?? [:],
+                playbackPositions: positions[loose] ?? [:],
+                played: (played[loose] ?? []).sorted()
+            ), at: url)
+        }
+        for url in plan.remove {
+            try? fm.removeItem(at: url)
+        }
+    }
+
+    nonisolated private static func decoder() -> JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }
+
+    /// Keeps last session's index as library.json.bak before this session first overwrites it.
     private func backUpOncePerSession() {
         guard !didBackUpThisSession else { return }
         didBackUpThisSession = true

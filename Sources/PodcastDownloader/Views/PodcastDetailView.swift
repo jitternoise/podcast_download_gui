@@ -385,6 +385,9 @@ struct EpisodeRow: View {
         if let onShowNotes {
             Button("Show Notes…") { onShowNotes() }
         }
+        if let link = episode.link {
+            Button("Open Episode Page") { model.openExternally(link) }
+        }
         Button("Copy Audio URL") {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(episode.enclosureURL.absoluteString, forType: .string)
@@ -453,12 +456,18 @@ struct EpisodeRow: View {
     }
 }
 
-/// Full show notes for one episode.
+/// Full show notes for one episode, as the feed published them (links and
+/// all) when that's more than the plain text in the list.
 struct EpisodeNotesView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     let episode: Episode
     let podcast: Podcast
+    @State private var rendered: AttributedString?
+
+    private var notes: AttributedString {
+        rendered ?? AttributedString(episode.summary.isEmpty ? "This episode has no show notes." : episode.summary)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -479,7 +488,7 @@ struct EpisodeNotesView: View {
             }
             Divider()
             ScrollView {
-                Text(episode.summary.isEmpty ? "This episode has no show notes." : episode.summary)
+                Text(notes)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -487,6 +496,9 @@ struct EpisodeNotesView: View {
                 Button("Copy Audio URL") {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(episode.enclosureURL.absoluteString, forType: .string)
+                }
+                if let link = episode.link {
+                    Button("Open Episode Page") { model.openExternally(link) }
                 }
                 Spacer()
                 Button(model.localFile(for: episode, in: podcast) == nil ? "Download and Play" : "Play") {
@@ -498,5 +510,9 @@ struct EpisodeNotesView: View {
         }
         .padding(20)
         .frame(width: 520, height: 460)
+        .task(id: episode.key) {
+            guard let html = await model.library.notesHTML(for: episode) else { return }
+            rendered = NotesRenderer.hasMarkup(html) ? NotesRenderer.render(html) : AttributedString(html)
+        }
     }
 }

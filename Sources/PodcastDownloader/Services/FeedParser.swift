@@ -6,6 +6,11 @@ struct ParsedFeed {
     var summary: String = ""
     var artworkURL: URL?
     var episodes: [Episode] = []
+    /// Show notes as published, by episode id — only for episodes whose notes
+    /// carry more than the plain text in `Episode.summary` (markup, links, or
+    /// a longer version). Stored on disk and read on demand, never held for
+    /// the whole library.
+    var notesHTML: [String: String] = [:]
     /// The URL the feed was actually fetched from — differs from what the user
     /// pasted when a web page pointed us at its RSS feed.
     var sourceURL: URL?
@@ -113,6 +118,8 @@ final class FeedParser: NSObject, XMLParserDelegate {
     private var itemGUID = ""
     private var itemSummary = ""
     private var itemDescription = ""
+    private var itemContent = ""           // <content:encoded>, the usual home of full HTML notes
+    private var itemLink = ""
     private var itemPubDate = ""
     private var itemDuration = ""
     private var itemEnclosureURL: String?
@@ -211,6 +218,8 @@ final class FeedParser: NSObject, XMLParserDelegate {
             case "pubDate": itemPubDate = value
             case "description": itemDescription = value
             case "itunes:summary": itemSummary = value
+            case "content:encoded": itemContent = value
+            case "link": itemLink = value
             case "itunes:duration": itemDuration = value
             default: break
             }
@@ -236,7 +245,7 @@ final class FeedParser: NSObject, XMLParserDelegate {
     // MARK: Helpers
 
     private func resetItem() {
-        itemTitle = ""; itemGUID = ""; itemSummary = ""; itemDescription = ""
+        itemTitle = ""; itemGUID = ""; itemSummary = ""; itemDescription = ""; itemContent = ""; itemLink = ""
         itemPubDate = ""; itemDuration = ""
         itemEnclosureURL = nil; itemEnclosureLength = nil; itemEnclosureType = nil
     }
@@ -253,16 +262,23 @@ final class FeedParser: NSObject, XMLParserDelegate {
         if seenIDs.contains(id) { id += "|" + enclosure }
         if seenIDs.contains(id) { id += "#" + String(feed.episodes.count + 1) }
         seenIDs.insert(id)
-        let summary = itemSummary.isEmpty ? itemDescription : itemSummary
+        let summary = HTMLStripper.strip(itemSummary.isEmpty ? itemDescription : itemSummary)
+        // The fullest version of the notes is kept as published. Feeds put
+        // it in any of three places; the longest is the one with the links.
+        let notes = [itemContent, itemDescription, itemSummary].max { $0.count < $1.count } ?? ""
+        if HTMLStripper.strip(notes) != summary || notes.count > summary.count {
+            feed.notesHTML[id] = notes
+        }
         feed.episodes.append(Episode(
             id: id,
             title: itemTitle.isEmpty ? "Untitled episode" : itemTitle,
-            summary: HTMLStripper.strip(summary),
+            summary: summary,
             publishedAt: RSSDate.parse(itemPubDate),
             enclosureURL: url,
             enclosureLength: itemEnclosureLength,
             mimeType: itemEnclosureType,
-            duration: itemDuration.isEmpty ? nil : itemDuration
+            duration: itemDuration.isEmpty ? nil : itemDuration,
+            link: URL(string: itemLink).flatMap { $0.isWebURL ? $0 : nil }
         ))
     }
 }

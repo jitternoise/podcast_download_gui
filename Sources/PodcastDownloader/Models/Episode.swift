@@ -9,6 +9,8 @@ struct Episode: Identifiable, Codable, Hashable {
     var enclosureLength: Int64?
     var mimeType: String?
     var duration: String?
+    /// The episode's web page (`<link>`), when the feed gives one.
+    var link: URL?
     /// The feed this episode came from (`Podcast.id`). Set by the library when
     /// episodes are cached, so `key` is unique across podcasts even when two
     /// feeds reuse the same guid.

@@ -14,9 +14,11 @@ final class FeedParserTests: XCTestCase {
       <item>
         <title>Episode 2: Slashes / Colons: Stars*</title>
         <guid isPermaLink="false">ep-2</guid>
+        <link>https://example.com/episodes/2</link>
         <pubDate>Mon, 08 Sep 2026 10:00:00 +0000</pubDate>
         <itunes:duration>3725</itunes:duration>
         <description><![CDATA[Second episode<br>with a line break]]></description>
+        <content:encoded><![CDATA[<p>Second episode<br>with a line break</p><p>Links: <a href="https://example.com/2">notes</a></p>]]></content:encoded>
         <enclosure url="https://example.com/ep2.mp3" length="12345" type="audio/mpeg"/>
       </item>
       <item>
@@ -52,6 +54,17 @@ final class FeedParserTests: XCTestCase {
         let ep1 = feed.episodes[1]
         XCTAssertEqual(ep1.fileExtension, "m4a", "extension should come from MIME type when URL has none")
         XCTAssertEqual(ep1.fileName, "2026-09-01 - Episode 1.m4a")
+    }
+
+    func testKeepsLinkAndTheFullestNotesAsPublished() throws {
+        let feed = try FeedParser().parse(Data(sampleFeed.utf8))
+        let ep2 = feed.episodes[0], ep1 = feed.episodes[1]
+        XCTAssertEqual(ep2.link?.absoluteString, "https://example.com/episodes/2")
+        XCTAssertNil(ep1.link)
+        XCTAssertEqual(feed.notesHTML["ep-2"], "<p>Second episode<br>with a line break</p><p>Links: <a href=\"https://example.com/2\">notes</a></p>",
+                       "content:encoded is the fullest version")
+        XCTAssertNil(feed.notesHTML["ep-1"], "nothing beyond the plain summary: nothing to keep")
+        XCTAssertEqual(ep2.summary, "Second episode\nwith a line break", "the list text is unchanged")
     }
 
     func testRejectsNonFeed() {

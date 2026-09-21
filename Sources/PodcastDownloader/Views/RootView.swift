@@ -26,6 +26,12 @@ struct RootView: View {
             } message: {
                 Text(model.alertMessage ?? "")
             }
+            .sheet(isPresented: Binding(
+                get: { model.verification != nil || model.showVerifyOptions },
+                set: { if !$0 { model.dismissVerification() } }
+            )) {
+                VerifyLibraryView().environment(model)
+            }
             .onDrop(of: [.url, .plainText], isTargeted: nil) { providers in
                 // Drop a feed link (or a page/Apple Podcasts link) anywhere.
                 for provider in providers {

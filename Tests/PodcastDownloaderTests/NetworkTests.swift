@@ -49,8 +49,8 @@ final class NetworkTests: XCTestCase {
         let finished = expectation(description: "download finished")
         var finishedURL: URL?
         let manager = await DownloadManager()
-        await manager.setFinishedHandler { _, url in
-            finishedURL = url
+        await manager.setFinishedHandler { _, result in
+            finishedURL = result.url
             finished.fulfill()
         }
         await manager.enqueue(episode, from: podcast, to: destination)

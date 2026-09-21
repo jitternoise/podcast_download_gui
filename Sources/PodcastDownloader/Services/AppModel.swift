@@ -35,6 +35,13 @@ final class AppModel {
     private(set) var moveStatus: String?
     var moveError: String?
 
+    /// Non-nil while "Verify Library" runs or its report is showing.
+    var verification: LibraryVerification?
+    /// The sheet that offers to run it.
+    var showVerifyOptions = false
+    private var verifyTask: Task<Void, Never>?
+    private var verifyGeneration = 0
+
     /// Episode keys that should open in the default player as soon as they land on disk.
     private var playWhenFinished: Set<String> = []
     /// Downloads requested while the library was being moved; started afterwards.
@@ -55,9 +62,9 @@ final class AppModel {
 
         downloads.maxConcurrent = settings.maxConcurrentDownloads
         library.migrateDownloadPaths(masterDirectory: settings.masterDirectory)
-        downloads.setFinishedHandler { [weak self] episode, url in
+        downloads.setFinishedHandler { [weak self] episode, result in
             guard let self else { return }
-            library.markDownloaded(episode, relativePath: relativePath(of: url))
+            library.markDownloaded(episode, relativePath: relativePath(of: result.url), size: result.size, sha256: result.sha256)
             rescanDisk()
             if playWhenFinished.remove(episode.key) != nil,
                let podcast = downloads.item(for: episode)?.podcast {
@@ -435,6 +442,85 @@ final class AppModel {
         where localFile(for: episode, in: podcast) == nil && !downloads.isQueuedOrActive(episode) {
             download(episode, from: podcast)
         }
+    }
+
+    // MARK: Verify
+
+    /// Checks every recorded download against what was fetched (see
+    /// `LibraryVerification`). Progress and the report land in `verification`.
+    func verifyLibrary(checksums: Bool) {
+        guard verifyTask == nil else { return }
+        let master = settings.masterDirectory
+        let records = library.downloaded.sorted { $0.key < $1.key }
+        var report = LibraryVerification()
+        report.checksums = checksums
+        report.total = records.count
+        verification = report
+        verifyGeneration += 1
+        let generation = verifyGeneration
+
+        verifyTask = Task { [weak self] in
+            // A hundred at a time: a stat per file is cheap, a hop to a
+            // background thread per file is not.
+            for batch in stride(from: 0, to: records.count, by: 100).map({ Array(records[$0..<min($0 + 100, records.count)]) }) {
+                if Task.isCancelled { break }
+                let outcomes = await Task.detached(priority: .utility) {
+                    batch.map { ($0.key, $0.value, LibraryVerifier.inspect($0.value, in: master, checksums: checksums)) }
+                }.value
+                guard let self, !Task.isCancelled else { break }
+                for (key, record, outcome) in outcomes {
+                    self.verification?.checked += 1
+                    switch outcome {
+                    case .ok: self.verification?.ok += 1
+                    case .inCloud: self.verification?.inCloud += 1
+                    case .missing:
+                        self.verification?.missing.append(.init(key: key, path: record.path, reason: "not found"))
+                    case .damaged(let reason):
+                        self.verification?.damaged.append(.init(key: key, path: record.path, reason: reason))
+                    case .baselined(let size, let sha256):
+                        self.library.setDownloadBaseline(size: size, sha256: sha256, forKey: key)
+                        self.verification?.ok += 1
+                        self.verification?.baselined += 1
+                    }
+                }
+            }
+            // A pass dismissed and restarted meanwhile owns `verification` now.
+            guard let self, self.verifyGeneration == generation else { return }
+            self.verification?.cancelled = Task.isCancelled
+            self.verification?.isRunning = false
+            self.verifyTask = nil
+        }
+    }
+
+    func cancelVerification() {
+        verifyTask?.cancel()
+    }
+
+    /// Closes the report. A running pass is stopped.
+    func dismissVerification() {
+        verifyTask?.cancel()
+        verifyTask = nil
+        verification = nil
+        showVerifyOptions = false
+    }
+
+    /// Fetches the missing and damaged files again. A damaged file is
+    /// replaced in place; a missing one lands where it would today. Episodes
+    /// no longer in their feed can't be fetched and are reported back.
+    @discardableResult
+    func redownloadVerificationProblems() -> Int {
+        guard let report = verification else { return 0 }
+        var queued = 0
+        var unknown = 0
+        for problem in report.problems {
+            guard let ref = library.episodeRef(forKey: problem.key) else { unknown += 1; continue }
+            download(ref.episode, from: ref.podcast)
+            queued += 1
+        }
+        if unknown > 0 {
+            alertMessage = "\(unknown) file\(unknown == 1 ? "" : "s") couldn't be queued: the episode is no longer in its feed (or the show is no longer a subscription)."
+        }
+        return queued
     }
 
     // MARK: Refresh

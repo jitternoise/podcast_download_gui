@@ -3,14 +3,26 @@ import XCTest
 
 @MainActor
 final class LibraryTests: XCTestCase {
+    private var dir: URL!
     private var file: URL!
 
-    override func setUp() {
-        file = FileManager.default.temporaryDirectory.appendingPathComponent("lib-\(UUID().uuidString).json")
+    override func setUpWithError() throws {
+        // A folder per test: the library keeps shows/ and notes/ next to its file.
+        dir = FileManager.default.temporaryDirectory.appendingPathComponent("lib-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        file = dir.appendingPathComponent("library.json")
     }
 
     override func tearDown() {
-        try? FileManager.default.removeItem(at: file)
+        try? FileManager.default.removeItem(at: dir)
+    }
+
+    private func showFile(_ podcast: Podcast) -> URL {
+        dir.appendingPathComponent("shows").appendingPathComponent(Library.fileName(for: podcast.id))
+    }
+
+    private func json(_ url: URL) throws -> [String: Any] {
+        try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
     }
 
     private func podcast(_ name: String) -> Podcast {
@@ -89,7 +101,175 @@ final class LibraryTests: XCTestCase {
         XCTAssertNil(lib.downloaded["ep1"], "old key is gone")
         await lib.flush()
         let written = try String(contentsOf: file, encoding: .utf8)
-        XCTAssertTrue(written.contains("\"version\":2"))
+        XCTAssertTrue(written.contains("\"version\":3"))
+    }
+
+    func testV2SingleFileIsSplitIntoIndexAndShowFiles() async throws {
+        let v2 = """
+        {"version":2,
+         "podcasts":[{"title":"A","author":"","feedURL":"https://example.com/A"},{"title":"B","author":"","feedURL":"https://example.com/B"}],
+         "episodes":{"https://example.com/A":[{"id":"a1","title":"A1","summary":"","enclosureURL":"https://example.com/a1.mp3"}],
+                     "https://example.com/B":[{"id":"b1","title":"B1","summary":"","enclosureURL":"https://example.com/b1.mp3"}]},
+         "downloaded":{"https://example.com/A|a1":"A/A1.mp3","file|Loose/x.mp3":"Loose/x.mp3"},
+         "lastRefreshed":{"https://example.com/A":"2026-09-01T00:00:00Z"},
+         "playbackPositions":{"https://example.com/B|b1":12,"file|Loose/x.mp3":99},
+         "played":["https://example.com/A|a1"],
+         "lastFullRefresh":"2026-09-02T00:00:00Z"}
+        """
+        try Data(v2.utf8).write(to: file)
+        let a = podcast("A"), b = podcast("B")
+        let lib = Library(fileURL: file)
+        XCTAssertNil(lib.loadError)
+        XCTAssertEqual(lib.episodes(for: a).map(\.id), ["a1"])
+        XCTAssertEqual(lib.downloadedRelativePath(for: lib.episodes(for: a)[0]), "A/A1.mp3")
+        await lib.flush()
+
+        // The index no longer carries episodes; each show has its own file.
+        let index = try json(file)
+        XCTAssertEqual(index["version"] as? Int, 3)
+        XCTAssertNil(index["episodes"])
+        XCTAssertEqual((index["downloaded"] as? [String: Any])?.keys.sorted(), ["file|Loose/x.mp3"], "only state outside any subscription stays in the index")
+        XCTAssertEqual((index["playbackPositions"] as? [String: Double])?["file|Loose/x.mp3"], 99)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: file.appendingPathExtension("bak").path), "the single-file version is kept")
+
+        let showA = try json(showFile(a)), showB = try json(showFile(b))
+        XCTAssertEqual((showA["episodes"] as? [[String: Any]])?.count, 1)
+        XCTAssertEqual(((showA["downloaded"] as? [String: Any])?["https://example.com/A|a1"] as? [String: Any])?["path"] as? String, "A/A1.mp3")
+        XCTAssertEqual(showA["played"] as? [String], ["https://example.com/A|a1"])
+        XCTAssertEqual(showA["lastRefreshed"] as? String, "2026-09-01T00:00:00Z")
+        XCTAssertEqual((showB["playbackPositions"] as? [String: Double])?["https://example.com/B|b1"], 12)
+
+        // And it all comes back.
+        let reloaded = Library(fileURL: file)
+        XCTAssertNil(reloaded.loadError)
+        XCTAssertEqual(reloaded.podcasts.map(\.title), ["A", "B"])
+        XCTAssertEqual(reloaded.episodes(for: b).map(\.id), ["b1"])
+        XCTAssertEqual(reloaded.playbackPosition(for: reloaded.episodes(for: b)[0]), 12)
+        XCTAssertTrue(reloaded.isPlayed(reloaded.episodes(for: a)[0]))
+        XCTAssertEqual(reloaded.lastRefreshed[a.id], ISO8601DateFormatter().date(from: "2026-09-01T00:00:00Z"))
+        XCTAssertNotNil(reloaded.lastFullRefresh)
+        XCTAssertEqual(reloaded.episodeID(downloadedTo: "Loose/x.mp3"), "file|Loose/x.mp3")
+    }
+
+    func testAPositionTickRewritesOneShowNotTheLibrary() async throws {
+        let lib = Library(fileURL: file)
+        let a = podcast("A"), b = podcast("B")
+        lib.subscribe(a); lib.subscribe(b)
+        lib.cacheEpisodes([episode("a1", daysAgo: 1)], for: a)
+        lib.cacheEpisodes([episode("b1", daysAgo: 1)], for: b)
+        await lib.flush()
+        let before = try (file: Data(contentsOf: file), a: Data(contentsOf: showFile(a)), b: Data(contentsOf: showFile(b)))
+
+        lib.setPlaybackPosition(30, for: lib.episodes(for: b)[0])
+        await lib.flush()
+
+        XCTAssertEqual(try Data(contentsOf: file), before.file, "index untouched")
+        XCTAssertEqual(try Data(contentsOf: showFile(a)), before.a, "other show untouched")
+        XCTAssertNotEqual(try Data(contentsOf: showFile(b)), before.b)
+        XCTAssertEqual(Library(fileURL: file).playbackPosition(for: lib.episodes(for: b)[0]), 30)
+    }
+
+    func testUnsubscribeRemovesTheShowFileButKeepsItsState() async throws {
+        let lib = Library(fileURL: file)
+        let a = podcast("A")
+        lib.subscribe(a)
+        lib.cacheEpisodes([episode("a1", daysAgo: 1)], for: a)
+        let a1 = lib.episodes(for: a)[0]
+        lib.markDownloaded(a1, relativePath: "A/a1.m4a", size: 10, sha256: "abc")
+        await lib.flush()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: showFile(a).path))
+
+        lib.unsubscribe(a)
+        await lib.flush()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: showFile(a).path))
+        let index = try json(file)
+        XCTAssertNotNil((index["downloaded"] as? [String: Any])?[a1.key], "the download record moved into the index")
+
+        // Re-subscribing (and refreshing) puts it back into the show's file.
+        let again = Library(fileURL: file)
+        XCTAssertEqual(again.downloadedRelativePath(for: a1), "A/a1.m4a")
+        again.subscribe(a)
+        again.cacheEpisodes([episode("a1", daysAgo: 1)], for: a)
+        await again.flush()
+        XCTAssertNil((try json(file)["downloaded"] as? [String: Any])?[a1.key])
+        XCTAssertEqual(Library(fileURL: file).downloaded[a1.key]?.sha256, "abc")
+    }
+
+    func testNotesAreKeptOnDiskAndReadOnDemand() async throws {
+        let lib = Library(fileURL: file)
+        let a = podcast("A")
+        lib.subscribe(a)
+        lib.loadFeed = { _ in
+            var feed = ParsedFeed()
+            feed.title = "A"
+            feed.episodes = [self.episode("a1", daysAgo: 1), self.episode("a2", daysAgo: 2)]
+            feed.notesHTML = ["a1": "<p>Hello <a href=\"https://example.com\">there</a></p>"]
+            return feed
+        }
+        await lib.refresh(a)
+        let a1 = lib.episodes(for: a)[0], a2 = lib.episodes(for: a)[1]
+        let early = await lib.notesHTML(for: a1)
+        XCTAssertEqual(early, "<p>Hello <a href=\"https://example.com\">there</a></p>", "available before the write lands")
+        let none = await lib.notesHTML(for: a2)
+        XCTAssertNil(none)
+        await lib.flush()
+
+        let notesFile = dir.appendingPathComponent("notes").appendingPathComponent(Library.fileName(for: a.id))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: notesFile.path))
+        let showFile = try String(contentsOf: showFile(a), encoding: .utf8)
+        XCTAssertFalse(showFile.contains("href"), "notes don't bloat the show file that's loaded at launch")
+
+        let reloaded = Library(fileURL: file)
+        let fromDisk = await reloaded.notesHTML(for: a1)
+        XCTAssertEqual(fromDisk, "<p>Hello <a href=\"https://example.com\">there</a></p>")
+        let stillNone = await reloaded.notesHTML(for: a2)
+        XCTAssertNil(stillNone)
+
+        reloaded.unsubscribe(a)
+        await reloaded.flush()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: notesFile.path), "gone with the subscription")
+    }
+
+    func testPreviewedShowsNotesStayInMemoryUntilSubscribed() async throws {
+        let lib = Library(fileURL: file)
+        let a = podcast("A")
+        lib.cacheEpisodes([episode("a1", daysAgo: 1)], for: a, notes: ["a1": "<b>hi</b>"])
+        let a1 = lib.episodes(for: a)[0]
+        let preview = await lib.notesHTML(for: a1)
+        XCTAssertEqual(preview, "<b>hi</b>")
+        lib.subscribe(a)
+        await lib.flush()
+        let persisted = await Library(fileURL: file).notesHTML(for: a1)
+        XCTAssertEqual(persisted, "<b>hi</b>")
+    }
+
+    func testUnreadableShowFileIsSetAsideAndReported() async throws {
+        let lib = Library(fileURL: file)
+        let a = podcast("A"), b = podcast("B")
+        lib.subscribe(a); lib.subscribe(b)
+        lib.cacheEpisodes([episode("a1", daysAgo: 1)], for: a)
+        lib.cacheEpisodes([episode("b1", daysAgo: 1)], for: b)
+        await lib.flush()
+        try Data("{ nope".utf8).write(to: showFile(a))
+
+        let reloaded = Library(fileURL: file)
+        XCTAssertNotNil(reloaded.loadError)
+        XCTAssertTrue(reloaded.loadError?.contains("“A”") == true, reloaded.loadError ?? "")
+        XCTAssertEqual(reloaded.podcasts.count, 2, "the subscription itself is fine")
+        XCTAssertTrue(reloaded.episodes(for: a).isEmpty)
+        XCTAssertEqual(reloaded.episodes(for: b).map(\.id), ["b1"], "the other show loaded")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: showFile(a).path))
+        let kept = try FileManager.default.contentsOfDirectory(atPath: dir.appendingPathComponent("shows").path)
+            .filter { $0.hasPrefix(Library.fileName(for: a.id) + ".corrupt-") }
+        XCTAssertEqual(kept.count, 1)
+    }
+
+    func testDownloadRecordReadsOldPlainPaths() throws {
+        let decoder = JSONDecoder()
+        let old = try decoder.decode([String: DownloadRecord].self, from: Data(#"{"k":"A/x.mp3"}"#.utf8))
+        XCTAssertEqual(old["k"], DownloadRecord(path: "A/x.mp3"))
+        let new = try decoder.decode([String: DownloadRecord].self, from: Data(#"{"k":{"path":"A/x.mp3","size":5,"sha256":"ab"}}"#.utf8))
+        XCTAssertEqual(new["k"], DownloadRecord(path: "A/x.mp3", size: 5, sha256: "ab"))
     }
 
     func testUnreadableFileIsKeptAsideNotOverwritten() async throws {
@@ -149,7 +329,7 @@ final class LibraryTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: file.path), "nothing written yet")
         lib.flushNow()
         let written = try String(contentsOf: file, encoding: .utf8)
-        XCTAssertTrue(written.contains("example.com") && written.contains("\"version\":2"))
+        XCTAssertTrue(written.contains("example.com") && written.contains("\"version\":3"))
 
         lib.subscribe(podcast("C"))
         await lib.flush()

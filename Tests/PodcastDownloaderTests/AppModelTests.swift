@@ -119,6 +119,58 @@ final class AppModelTests: XCTestCase {
         XCTAssertNotNil(model.localFile(for: a, in: show), "recorded relative path resolves under the new master")
     }
 
+    func testVerifyLibraryFindsMissingAndChangedFilesAndQueuesThemAgain() async throws {
+        model.library.subscribe(show)
+        model.library.cacheEpisodes([episode("ok", title: "OK"), episode("gone", title: "Gone"),
+                                     episode("short", title: "Short"), episode("old", title: "Old")], for: show)
+        let eps = Dictionary(uniqueKeysWithValues: model.library.episodes(for: show).map { ($0.id, $0) })
+        let okHash = try FileHash.sha256(of: try writeFile("Show/ok.mp3", bytes: 100))
+        model.library.markDownloaded(eps["ok"]!, relativePath: "Show/ok.mp3", size: 100, sha256: okHash)
+        model.library.markDownloaded(eps["gone"]!, relativePath: "Show/gone.mp3", size: 100, sha256: okHash)
+        _ = try writeFile("Show/short.mp3", bytes: 40)
+        model.library.markDownloaded(eps["short"]!, relativePath: "Show/short.mp3", size: 100, sha256: okHash)
+        _ = try writeFile("Show/old.mp3", bytes: 64)
+        model.library.markDownloaded(eps["old"]!, relativePath: "Show/old.mp3")     // from before sizes were kept
+
+        model.verifyLibrary(checksums: false)
+        while model.verification?.isRunning == true { try await Task.sleep(for: .milliseconds(20)) }
+        let report = try XCTUnwrap(model.verification)
+
+        XCTAssertEqual(report.checked, 4)
+        XCTAssertEqual(report.missing.map(\.path), ["Show/gone.mp3"])
+        XCTAssertEqual(report.damaged.map(\.path), ["Show/short.mp3"])
+        XCTAssertEqual(report.baselined, 1)
+        XCTAssertEqual(model.library.downloaded[eps["old"]!.key]?.size, 64, "the size on disk is now the baseline")
+        XCTAssertNil(model.library.downloaded[eps["old"]!.key]?.sha256, "no checksum was asked for")
+
+        XCTAssertEqual(model.redownloadVerificationProblems(), 2)
+        XCTAssertEqual(Set(model.downloads.activeItems.map(\.episode.id)), ["gone", "short"])
+        XCTAssertEqual(model.downloads.item(for: eps["short"]!)?.destination.lastPathComponent, "short.mp3", "a damaged file is replaced in place")
+        model.cancelAllDownloads()
+        model.dismissVerification()
+        XCTAssertNil(model.verification)
+    }
+
+    func testVerifyLibraryWithChecksumsCatchesSameSizeChanges() async throws {
+        model.library.subscribe(show)
+        model.library.cacheEpisodes([episode("a", title: "A"), episode("b", title: "B")], for: show)
+        let a = model.library.episodes(for: show)[0], b = model.library.episodes(for: show)[1]
+        let fileA = try writeFile("Show/a.mp3", bytes: 50)
+        model.library.markDownloaded(a, relativePath: "Show/a.mp3", size: 50, sha256: try FileHash.sha256(of: fileA))
+        try Data(repeating: 2, count: 50).write(to: fileA)                    // same size, different bytes
+        let fileB = try writeFile("Show/b.mp3", bytes: 50)
+        model.library.markDownloaded(b, relativePath: "Show/b.mp3", size: 50)  // size known, no checksum yet
+
+        model.verifyLibrary(checksums: true)
+        while model.verification?.isRunning == true { try await Task.sleep(for: .milliseconds(20)) }
+        let report = try XCTUnwrap(model.verification)
+
+        XCTAssertEqual(report.damaged.map(\.path), ["Show/a.mp3"])
+        XCTAssertEqual(report.baselined, 1)
+        XCTAssertEqual(model.library.downloaded[b.key]?.sha256, try FileHash.sha256(of: fileB))
+        model.dismissVerification()
+    }
+
     func testRefreshAllFetchesOnlyAFewFeedsAtOnce() async {
         for i in 0..<20 {
             model.library.subscribe(Podcast(title: "S\(i)", author: "", feedURL: URL(string: "https://example.com/\(i)")!))

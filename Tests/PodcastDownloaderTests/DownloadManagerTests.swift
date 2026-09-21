@@ -90,16 +90,19 @@ final class DownloadManagerTests: XCTestCase {
         let ep = episode("ident", url: server.url(path: "/show/ident.mp3").absoluteString)
         let dest = root.appendingPathComponent("Show/ident.mp3")
 
-        var finished: URL?
-        manager.setFinishedHandler { _, url in finished = url }
+        var finished: DownloadTransport.Completed?
+        manager.setFinishedHandler { _, result in finished = result }
         manager.enqueue(ep, from: podcast, to: dest)
         let item = try await waitForFinish(manager, ep)
 
         XCTAssertEqual(item.state, .finished)
-        XCTAssertEqual(finished, dest)
+        XCTAssertEqual(finished?.url, dest)
         let onDisk = try Data(contentsOf: dest)
         XCTAssertEqual(onDisk.count, body.count)
         XCTAssertEqual(SHA256.hash(data: onDisk), SHA256.hash(data: body), "what's on disk is exactly what the server sent")
+        XCTAssertEqual(finished?.size, Int64(body.count))
+        XCTAssertEqual(finished?.sha256, SHA256.hash(data: body).map { String(format: "%02x", $0) }.joined(),
+                       "the checksum recorded is the checksum of the bytes on disk")
         XCTAssertFalse(FileManager.default.fileExists(atPath: dest.path + ".part"), "no staging file left behind")
     }
 
@@ -136,7 +139,7 @@ final class DownloadManagerTests: XCTestCase {
         let planned = root.appendingPathComponent("Show/2026 - Mislabelled.mp3")
 
         var finished: URL?
-        manager.setFinishedHandler { _, url in finished = url }
+        manager.setFinishedHandler { _, result in finished = result.url }
         manager.enqueue(ep, from: podcast, to: planned)
         _ = try await waitForFinish(manager, ep)
 
@@ -182,6 +185,27 @@ final class DownloadManagerTests: XCTestCase {
         XCTAssertNoThrow(try DownloadTransport.check(file: file, response: response(length: 5_000, encoding: "gzip"), expected: expected),
                          "a compressed transfer's Content-Length isn't the file size")
         XCTAssertNoThrow(try DownloadTransport.check(file: file, response: nil, expected: expected), "no announced length: nothing to compare")
+    }
+
+    func testFeedLengthIsOnlyAFallbackAndOnlyForAGrossShortfall() throws {
+        let file = root.appendingPathComponent("body.tmp")
+        try Self.fakeMP3(1_000).write(to: file)
+        let url = URL(string: "https://example.com/x.mp3")!
+        // Chunked / no Content-Length: the server announced nothing.
+        let silent = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "audio/mpeg"])!
+        func feedSays(_ length: Int64?) -> DownloadTransport.Expectation { .init(mimeType: "audio/mpeg", length: length) }
+
+        XCTAssertNoThrow(try DownloadTransport.check(file: file, response: silent, expected: feedSays(nil)))
+        XCTAssertNoThrow(try DownloadTransport.check(file: file, response: silent, expected: feedSays(1_900)), "feeds are off by a bit all the time")
+        XCTAssertNoThrow(try DownloadTransport.check(file: file, response: silent, expected: feedSays(500)), "a file bigger than announced is fine")
+        XCTAssertThrowsError(try DownloadTransport.check(file: file, response: silent, expected: feedSays(2_100))) { error in
+            XCTAssertTrue(error is DownloadTransport.TruncatedDownload)
+            XCTAssertTrue("\(error.localizedDescription)".contains("the feed announces"))
+        }
+        // When the server did announce a length, the feed's number is ignored.
+        let announced = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1",
+                                        headerFields: ["Content-Type": "audio/mpeg", "Content-Length": "1000"])!
+        XCTAssertNoThrow(try DownloadTransport.check(file: file, response: announced, expected: feedSays(50_000)))
     }
 
     func testFailedStartDoesNotBlockTheQueue() {

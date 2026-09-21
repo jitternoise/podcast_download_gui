@@ -24,6 +24,9 @@ struct PodcastDownloaderApp: App {
                 Button("Import Subscriptions (OPML)…") { importOPML() }
                 Button("Export Subscriptions (OPML)…") { exportOPML() }
                     .disabled(model.library.podcasts.isEmpty)
+                Divider()
+                Button("Verify Library…") { model.showVerifyOptions = true }
+                    .disabled(model.library.downloaded.isEmpty || model.verification != nil)
             }
             CommandGroup(after: .sidebar) {
                 Button("Refresh All Subscriptions") { Task { await model.refreshAll() } }

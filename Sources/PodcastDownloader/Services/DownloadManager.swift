@@ -27,7 +27,7 @@ final class DownloadManager {
     static let maxAutoRetries = 2
 
     private var tasks: [String: URLSessionDownloadTask] = [:]
-    private var onFinished: ((Episode, URL) -> Void)?
+    private var onFinished: ((Episode, DownloadTransport.Completed) -> Void)?
     private var transport: DownloadTransport!
     /// Held while anything is downloading: keeps the Mac from idle-sleeping and
     /// App Nap from throttling us when the window is hidden.
@@ -45,7 +45,7 @@ final class DownloadManager {
     }
 
     /// Called on the main actor whenever a download lands on disk.
-    func setFinishedHandler(_ handler: @escaping (Episode, URL) -> Void) {
+    func setFinishedHandler(_ handler: @escaping (Episode, DownloadTransport.Completed) -> Void) {
         onFinished = handler
     }
 
@@ -185,18 +185,18 @@ final class DownloadManager {
         items[idx].bytesExpected = expected
     }
 
-    private func complete(id: String, result: Result<URL, DownloadTransport.Failure>) {
+    private func complete(id: String, result: Result<DownloadTransport.Completed, DownloadTransport.Failure>) {
         tasks[id] = nil
         guard let idx = items.firstIndex(where: { $0.id == id }) else { return }
         // A cancelled item already had its state set; don't overwrite it.
         guard items[idx].state == .downloading else { pump(); return }
 
         switch result {
-        case .success(let url):
+        case .success(let completed):
             items[idx].state = .finished
             items[idx].bytesReceived = items[idx].bytesExpected
             items[idx].resumeData = nil
-            onFinished?(items[idx].episode, url)
+            onFinished?(items[idx].episode, completed)
         case .failure(let failure):
             items[idx].resumeData = failure.resumeData
             if failure.isTransient, items[idx].autoRetries < Self.maxAutoRetries {
@@ -220,12 +220,20 @@ final class DownloadManager {
 /// closures. Its only mutable state is `pending`, guarded by `lock`.
 final class DownloadTransport: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
     typealias ProgressHandler = @Sendable (String, Int64, Int64) -> Void
-    typealias CompletionHandler = @Sendable (String, Result<URL, Failure>) -> Void
+    typealias CompletionHandler = @Sendable (String, Result<Completed, Failure>) -> Void
 
     /// What the feed said about the enclosure, used to spot bodies that aren't audio.
     struct Expectation {
         var mimeType: String?
         var length: Int64?
+    }
+
+    /// A download that passed every check and is in its final place, with
+    /// what was measured on the way: the record "Verify Library" checks against.
+    struct Completed: Sendable {
+        let url: URL
+        let size: Int64
+        let sha256: String
     }
 
     struct Failure: Error, @unchecked Sendable {
@@ -339,7 +347,7 @@ final class DownloadTransport: NSObject, URLSessionDownloadDelegate, @unchecked 
                 try fm.removeItem(at: stale)        // "Download Again": replace the old copy
             }
             try fm.moveItem(at: partial, to: final)
-            onComplete(p.id, .success(final))
+            onComplete(p.id, .success(Completed(url: final, size: verdict.size, sha256: verdict.sha256)))
         } catch {
             onComplete(p.id, .failure(Failure(error: error, resumeData: nil)))
         }
@@ -354,11 +362,14 @@ final class DownloadTransport: NSObject, URLSessionDownloadDelegate, @unchecked 
     struct Verdict {
         /// The format the bytes turned out to be, when recognised.
         var sniffedExtension: String?
+        var size: Int64
+        var sha256: String
     }
 
     /// Validates a completed transfer: the server's promised length must
     /// match, and the body must be media, not a web page. Throws a
-    /// user-readable reason otherwise.
+    /// user-readable reason otherwise. The file's checksum is taken here,
+    /// while it is still in the page cache from being written.
     static func check(file: URL, response: URLResponse?, expected: Expectation) throws -> Verdict {
         if let reason = rejectionReason(for: file, response: response, expected: expected) {
             throw FeedError(message: reason)
@@ -368,12 +379,20 @@ final class DownloadTransport: NSObject, URLSessionDownloadDelegate, @unchecked 
         let size = (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
         let promised = response?.expectedContentLength ?? -1
         let encoded = ((response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Encoding") ?? "identity").lowercased()
+        let got = ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
         if promised > 0, encoded == "identity", size != promised {
-            let got = ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
             let want = ByteCountFormatter.string(fromByteCount: promised, countStyle: .file)
             throw TruncatedDownload(message: "Download was cut short (\(got) of \(want)). Retry to fetch it again.")
         }
-        return Verdict(sniffedExtension: MediaSniffer.fileExtension(of: file))
+        // No length from the server: the feed's <enclosure length> is the
+        // only clue, and feeds get it wrong by a little all the time (ads
+        // stitched in, re-encodes). Only a body under half of it is treated
+        // as cut short.
+        if promised <= 0, let announced = expected.length, announced > 0, size * 2 < announced {
+            let want = ByteCountFormatter.string(fromByteCount: announced, countStyle: .file)
+            throw TruncatedDownload(message: "Download was cut short (\(got) of about \(want), the size the feed announces). Retry to fetch it again.")
+        }
+        return Verdict(sniffedExtension: MediaSniffer.fileExtension(of: file), size: size, sha256: try FileHash.sha256(of: file))
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {

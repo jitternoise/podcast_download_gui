@@ -22,7 +22,9 @@ downloading episodes to a folder of your choosing.
 - **Episode lists** can be searched, filtered (all / downloaded / unplayed) and
   sorted; they show what's played, what's in progress and how much is left.
   Arrow keys move, Return plays, Delete trashes a download, Space
-  pauses/resumes. Right-click for show notes, Mark as Played, Delete Download.
+  pauses/resumes. Right-click for show notes, the episode's web page, Mark as
+  Played, Delete Download. Show notes are kept exactly as the feed published
+  them — links included — and shown in full.
 - **Download** individual episodes or an entire back catalog, with a concurrent
   download queue and per-episode progress. Downloads keep the Mac from idle-
   sleeping, survive a lost Wi-Fi connection or a lid-close by resuming where
@@ -31,7 +33,10 @@ downloading episodes to a folder of your choosing.
   a transfer shorter than the server announced is retried rather than kept,
   a web page served in place of audio is rejected, files are staged as
   `.part` until complete, and each file is named for the format its bytes
-  actually are (a `.mp3` URL that serves AAC becomes `.m4a`).
+  actually are (a `.mp3` URL that serves AAC becomes `.m4a`). Every finished
+  download is recorded with its size and SHA-256 checksum; **File ▸ Verify
+  Library…** later checks that each file is still there and unchanged
+  (optionally byte for byte) and offers to fetch again whatever isn't.
 - **Built-in player** — double-click an episode to play it in the player bar at
   the bottom of the window: play/pause, skip back/forward (5–60 s, your
   choice), scrubber, chapters when the file has them, playback speed
@@ -101,6 +106,9 @@ Sources/PodcastDownloader/
     AppSettings.swift             Master folder + concurrency (UserDefaults)
     Library.swift                 Subscriptions & episode cache (JSON on disk)
     LibraryFolder.swift           Scans / relocates the master folder
+    LibraryVerifier.swift         "Verify Library": sizes and checksums vs. disk
+    FileHash.swift                Streaming SHA-256
+    NotesRenderer.swift           Show notes HTML -> attributed text with links
     RefreshPolicy.swift           Throttle for automatic feed refreshes
     FeedParser.swift              RSS 2.0 + iTunes-extension parser
     PodcastSearchService.swift    Apple Podcasts search API client
@@ -115,7 +123,9 @@ Sources/PodcastDownloader/
 | What | Where |
 |------|-------|
 | Downloaded audio | Master folder (default `~/Music/Podcasts`; an existing `~/Downloads/Podcasts` from earlier versions is kept; change in **Settings ⌘,**) |
-| Subscriptions & episode cache | `~/Library/Application Support/PodcastDownloader/library.json` (download locations stored relative to the master folder; the previous session's copy is kept as `library.json.bak`, and a file that can't be read is set aside as `library.json.corrupt-…` rather than overwritten) |
+| Subscriptions | `~/Library/Application Support/PodcastDownloader/library.json` (the previous session's copy is kept as `library.json.bak`; a file that can't be read is set aside as `library.json.corrupt-…` rather than overwritten) |
+| Episodes, downloads, positions — per show | `…/PodcastDownloader/shows/<id>.json`, one file per subscription, rewritten only when that show changes. Download locations are stored relative to the master folder, with the size and checksum of each file. |
+| Show notes (HTML) | `…/PodcastDownloader/notes/<id>.json`, read only when an episode's notes are opened |
 | Preferences | `UserDefaults` |
 
 ## Keyboard shortcuts
@@ -155,8 +165,16 @@ download one episode; they only run when asked:
 PODCAST_NETWORK_TESTS=1 swift test --filter NetworkTests
 ```
 
+`StorageBenchmark` prints load/save timings for a library of any size and is
+skipped unless pointed at a folder holding a `library.json` (which it copies):
+
+```bash
+PODCAST_BENCH_DIR=/path/to/folder swift test -c release --filter StorageBenchmark
+```
+
 CI (`.github/workflows/ci.yml`) builds, runs the headless tests and packages
-the universal `.app` on every push.
+the universal `.app` on every push, on GitHub's current macOS image with its
+default Xcode.
 
 ## Distributing to other Macs
 
