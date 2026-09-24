@@ -45,14 +45,17 @@ struct PodcastDetailView: View {
     }
 
     var body: some View {
+        // Stats every episode, so work it out once per render and share it
+        // between the header button, the toolbar button and the dialog.
+        let missing = missingEpisodes
         VStack(spacing: 0) {
-            header
+            header(missing: missing)
             Divider()
             episodeList
         }
         .navigationTitle(current.title)
         .searchable(text: $searchText, placement: .toolbar, prompt: "Search episodes")
-        .toolbar { toolbarContent }
+        .toolbar { toolbarContent(missing: missing) }
         .task(id: podcast.id) {
             // Detached from this view's lifetime: navigating away must not
             // cancel the fetch (and record "cancelled" as a feed error).
@@ -62,10 +65,10 @@ struct PodcastDetailView: View {
         .onChange(of: model.onDisk) { _, _ in recount() }
         .onChange(of: model.library.downloaded.count) { _, _ in recount() }
         .onChange(of: episodes.count) { _, _ in recount() }
-        .confirmationDialog(downloadAllTitle, isPresented: $confirmDownloadAll, titleVisibility: .visible) {
-            Button("Download \(missingEpisodes.count) Episodes") { model.downloadAll(current) }
+        .confirmationDialog(downloadAllTitle(missing), isPresented: $confirmDownloadAll, titleVisibility: .visible) {
+            Button("Download \(missing.count) Episodes") { model.downloadAll(current) }
         } message: {
-            Text(downloadAllMessage)
+            Text(downloadAllMessage(missing))
         }
         .confirmationDialog("Unsubscribe from “\(current.title)”?", isPresented: $confirmUnsubscribe, titleVisibility: .visible) {
             Button("Unsubscribe", role: .destructive) { model.library.unsubscribe(podcast) }
@@ -85,7 +88,7 @@ struct PodcastDetailView: View {
 
     // MARK: Header
 
-    private var header: some View {
+    private func header(missing: [Episode]) -> some View {
         HStack(alignment: .top, spacing: 16) {
             ArtworkView(url: current.artworkURL, size: 110)
 
@@ -114,8 +117,16 @@ struct PodcastDetailView: View {
                 .foregroundStyle(.tertiary)
                 .padding(.top, 2)
 
-                if isSubscribed {
-                    HStack(spacing: 16) {
+                HStack(spacing: 16) {
+                    Button {
+                        confirmDownloadAll = true
+                    } label: {
+                        Label("Download All…", systemImage: "arrow.down.to.line")
+                    }
+                    .disabled(missing.isEmpty)
+                    .help(downloadAllHelp(missing))
+
+                    if isSubscribed {
                         Toggle("Automatically download new episodes", isOn: autoDownloadBinding)
                             .toggleStyle(.checkbox)
                         if current.autoDownload {
@@ -126,8 +137,8 @@ struct PodcastDetailView: View {
                             .help("Older auto-downloads are moved to the Trash once this many are on disk. 0 keeps everything.")
                         }
                     }
-                    .padding(.top, 4)
                 }
+                .padding(.top, 4)
 
                 if let error = model.library.refreshErrors[podcast.id] {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
@@ -211,20 +222,24 @@ struct PodcastDetailView: View {
         episodes.filter { model.localFile(for: $0, in: current) == nil && !model.downloads.isQueuedOrActive($0) }
     }
 
-    private var downloadAllTitle: String {
-        "Download all \(missingEpisodes.count) episodes of “\(current.title)”?"
+    private func downloadAllTitle(_ missing: [Episode]) -> String {
+        "Download all \(missing.count) episodes of “\(current.title)”?"
     }
 
-    private var downloadAllMessage: String {
-        let bytes = missingEpisodes.compactMap(\.enclosureLength).reduce(0, +)
-        let unknown = missingEpisodes.filter { ($0.enclosureLength ?? 0) <= 0 }.count
+    private func downloadAllHelp(_ missing: [Episode]) -> String {
+        missing.isEmpty ? "Every episode is already on disk" : "Download every episode that isn't already on disk"
+    }
+
+    private func downloadAllMessage(_ missing: [Episode]) -> String {
+        let bytes = missing.compactMap(\.enclosureLength).reduce(0, +)
+        let unknown = missing.filter { ($0.enclosureLength ?? 0) <= 0 }.count
         var text = bytes > 0 ? "About \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))" : "Size unknown"
         if bytes > 0, unknown > 0 { text += " (plus \(unknown) of unknown size)" }
         return text + ". Files go to \(model.settings.folder(for: current).path)."
     }
 
     @ToolbarContentBuilder
-    private var toolbarContent: some ToolbarContent {
+    private func toolbarContent(missing: [Episode]) -> some ToolbarContent {
         ToolbarItemGroup(placement: .primaryAction) {
             Menu {
                 Picker("Show", selection: $filter) {
@@ -267,8 +282,8 @@ struct PodcastDetailView: View {
             } label: {
                 Label("Download All", systemImage: "arrow.down.to.line")
             }
-            .disabled(missingEpisodes.isEmpty)
-            .help(missingEpisodes.isEmpty ? "Every episode is already on disk" : "Download every episode that isn't already on disk")
+            .disabled(missing.isEmpty)
+            .help(downloadAllHelp(missing))
 
             Button {
                 model.openFolder(for: current)
